@@ -1,6 +1,109 @@
-<html>
-<h1>This is my first web page powered by GitHub Pages <h1>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tesla Model Y Price Tracker</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
 
-Thanks GitHub!
+  <header>
+    <h1><span class="accent">Tesla</span> Model Y &mdash; Lease Price Tracker</h1>
+    <span class="subtitle">selectcarleasing.com &bull; updated daily</span>
+  </header>
 
+  <main>
+
+    <!-- Filters -->
+    <section class="filters">
+      <div class="filter-group">
+        <label for="filter-variant">Variant</label>
+        <select id="filter-variant"></select>
+      </div>
+      <div class="filter-group">
+        <label for="filter-months">Contract Length</label>
+        <select id="filter-months"></select>
+      </div>
+      <div class="filter-group">
+        <label for="filter-mileage">Annual Mileage</label>
+        <select id="filter-mileage"></select>
+      </div>
+    </section>
+
+    <!-- Stats -->
+    <section class="stats-bar">
+      <div class="stat-card" id="stat-cheapest">
+        <div class="label">Cheapest monthly</div>
+        <div class="value accent">--</div>
+        <div class="delta"></div>
+      </div>
+      <div class="stat-card" id="stat-avg">
+        <div class="label">Avg monthly price</div>
+        <div class="value">--</div>
+        <div class="delta"></div>
+      </div>
+      <div class="stat-card" id="stat-listings">
+        <div class="label">Listings today</div>
+        <div class="value">0</div>
+        <div class="delta"></div>
+      </div>
+      <div class="stat-card" id="stat-days">
+        <div class="label">Days tracked</div>
+        <div class="value">0</div>
+        <div class="delta"></div>
+      </div>
+    </section>
+
+    <!-- Price trend chart -->
+    <section class="chart-panel">
+      <div class="panel-title">Price Trends</div>
+      <div class="chart-wrap">
+        <div id="chart-container" style="position:relative;height:100%;width:100%;">
+          <canvas id="price-chart"></canvas>
+        </div>
+        <div id="chart-empty" class="empty-state" style="display:none;">
+          <span class="icon">📈</span>
+          <p>Need at least 2 days of data to show trends.</p>
+          <small>Check back tomorrow after the daily scrape runs.</small>
+        </div>
+      </div>
+    </section>
+
+    <!-- Current prices table -->
+    <section class="table-panel">
+      <div class="panel-title">Latest Prices</div>
+      <div class="table-wrap">
+        <table id="prices-table">
+          <thead>
+            <tr>
+              <th data-col="variant">Variant</th>
+              <th data-col="monthly_price" class="sorted-asc">Monthly Price</th>
+              <th data-col="initial_payment">Initial Payment</th>
+              <th data-col="contract_months">Contract</th>
+              <th data-col="annual_mileage">Mileage/yr</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+          <tbody>
+            <tr id="table-empty-row">
+              <td colspan="5" style="text-align:center;padding:2rem;color:var(--text-muted);">
+                No data yet &mdash; trigger the GitHub Actions workflow to run the first scrape.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    Data scraped from <a href="https://www.selectcarleasing.com/car-leasing/tesla/model-y/" target="_blank" rel="noopener">selectcarleasing.com</a>
+    for personal price monitoring only.
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="dashboard.js"></script>
+</body>
 </html>
