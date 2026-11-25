@@ -223,7 +223,7 @@ test('documents: names, sizes and icons', () => {
 });
 
 // ---------- costs & budget ----------
-import { toHome, spreadCost, budgetSummary, parseAmount, guessCurrency, fmtMoney } from '../../travel-planner/js/budget.js';
+import { toHome, spreadCost, budgetSummary, parseAmount, guessCurrency, fmtMoney, payment } from '../../travel-planner/js/budget.js';
 
 test('budget: amounts parse in common formats', () => {
   assert.equal(parseAmount('1,234.50'), 1234.5);
@@ -319,4 +319,41 @@ test('scan: model output becomes booking drafts', () => {
   assert.deepEqual(placesToLocate(f), ['from', 'to']);
   assert.deepEqual(placesToLocate({ place: { name: 'x', lat: 1, lon: 2 } }), []);
   assert.deepEqual(normalizeBookings(null), []);
+});
+
+test('budget: deposits count as paid, the balance as still to pay', () => {
+  assert.deepEqual(payment({ cost: 100, paid: true }), { status: 'full', paid: 100, due: 0, balanceDue: '' });
+  assert.deepEqual(payment({ cost: 100, deposit: 30, balanceDue: '2026-11-20' }), { status: 'deposit', paid: 30, due: 70, balanceDue: '2026-11-20' });
+  assert.deepEqual(payment({ cost: 100 }), { status: 'none', paid: 0, due: 100, balanceDue: '' });
+  assert.equal(payment({ cost: 100, deposit: 150 }).paid, 100, 'deposit is capped at the cost');
+  const items = [
+    { ...hotel, cost: 300, currency: 'USD', deposit: 50, balanceDue: '2026-11-20' },
+    { ...flight, cost: 500, currency: 'GBP', paid: true },
+    { ...moma, cost: 40, currency: 'GBP' },
+  ];
+  const b = budgetSummary(items, { currency: 'GBP', rates: { USD: 0.8 } }, '2026-11-25');
+  assert.equal(b.total, 240 + 500 + 40);
+  assert.equal(b.paid, 40 + 500);
+  assert.equal(b.unpaid, 200 + 40);
+  assert.deepEqual(b.upcoming.map((r) => [r.item.id, r.dueLocal, r.by, r.overdue]), [
+    ['h1', 250, '2026-11-20', true],
+    ['a1', 40, '2026-12-02', false],
+  ]);
+  assert.equal(b.rows.find((r) => r.item.id === 'h1').status, 'deposit');
+});
+
+test('scan: deposits and balance-due dates are read from confirmations', () => {
+  const blank = { title: '', provider: '', number: '', ref: '', seat: '', start: '', end: '', place: { name: '', search: '' }, from: { name: '', search: '' }, to: { name: '', search: '' }, cost: '', currency: '', paid: false, deposit: '', balanceDue: '', notes: '' };
+  const [a, b, c] = normalizeBookings([
+    { ...blank, type: 'hotel', title: 'Villa', start: '2026-12-01', cost: '1200', currency: 'EUR', deposit: '300', balanceDue: '2026-11-01' },
+    { ...blank, type: 'hotel', title: 'B&B', start: '2026-12-03', cost: '200', deposit: '200' },
+    { ...blank, type: 'activity', title: 'Tour', start: '2026-12-02', cost: '50', paid: true, deposit: '10', balanceDue: '2026-11-01' },
+  ], { currency: 'GBP' });
+  assert.equal(a.deposit, 300);
+  assert.equal(a.balanceDue, '2026-11-01');
+  assert.equal(a.paid, false);
+  assert.equal(b.paid, true, 'a deposit of the whole price means paid in full');
+  assert.equal(b.deposit, undefined);
+  assert.equal(c.deposit, undefined, 'paid in full ignores the deposit');
+  assert.equal(c.balanceDue, undefined);
 });

@@ -39,10 +39,12 @@ const BOOKING = {
     to: { ...PLACE, description: 'Arrival airport/station or car drop-off location (empty if same as pick-up).' },
     cost: { type: 'string', description: 'Total price as a plain number like "245.50", or empty.' },
     currency: { type: 'string', description: 'ISO 4217 code of the price, e.g. "GBP", or empty.' },
-    paid: { type: 'boolean', description: 'True if the document says it is paid / prepaid / charged.' },
+    paid: { type: 'boolean', description: 'True only if the document says the full price is paid / prepaid / charged.' },
+    deposit: { type: 'string', description: 'If only a deposit or part payment has been made: the amount paid so far as a plain number, else empty.' },
+    balanceDue: { type: 'string', description: 'Date the remaining balance must be paid by, "YYYY-MM-DD", else empty.' },
     notes: { type: 'string', description: 'Other useful details in one or two short lines (check-in instructions, baggage, what is included). Empty if none.' },
   },
-  required: ['type', 'title', 'provider', 'number', 'ref', 'seat', 'start', 'end', 'place', 'from', 'to', 'cost', 'currency', 'paid', 'notes'],
+  required: ['type', 'title', 'provider', 'number', 'ref', 'seat', 'start', 'end', 'place', 'from', 'to', 'cost', 'currency', 'paid', 'deposit', 'balanceDue', 'notes'],
   additionalProperties: false,
 };
 
@@ -260,6 +262,13 @@ export function normalizeBookings(raw, { currency = 'USD' } = {}) {
       const cur = String(b.currency || '').trim().toUpperCase();
       d.currency = /^[A-Z]{3}$/.test(cur) ? cur : currency;
       d.paid = !!b.paid;
+      const dep = parseAmount(b.deposit);
+      if (!d.paid && dep !== null && dep > 0 && String(b.deposit ?? '').trim()) {
+        d.deposit = Math.min(dep, cost);
+        if (d.deposit >= cost) { d.paid = true; delete d.deposit; }
+      }
+      const due = String(b.balanceDue || '').trim();
+      if (!d.paid && /^\d{4}-\d{2}-\d{2}$/.test(due)) d.balanceDue = due;
     }
     out.push(d);
   }
