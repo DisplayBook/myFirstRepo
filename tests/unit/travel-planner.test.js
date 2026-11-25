@@ -194,3 +194,129 @@ test('calendar export', () => {
   assert.match(ics, /UID:d1@trip-planner\r\nDTSTAMP:20261125T120000Z\r\nDTSTART:20261204T120000\r\nDTEND:20261204T154000/);
   assert.ok(ics.split('\r\n').every((l) => l.length <= 75));
 });
+
+// ---------- documents ----------
+import { splitBytes, joinBytes, fmtBytes, safeName, isPdf, fileIcon, CHUNK_BYTES } from '../../travel-planner/js/files.js';
+
+test('documents: bytes split into chunks under the Firestore limit and join back', () => {
+  const data = new Uint8Array(CHUNK_BYTES * 2 + 123).map((_, i) => i % 251);
+  const parts = splitBytes(data);
+  assert.equal(parts.length, 3);
+  assert.ok(parts.every((p) => p.length <= CHUNK_BYTES && p.length < 1000000));
+  assert.deepEqual(joinBytes(parts), data);
+  assert.equal(splitBytes(new Uint8Array(0)).length, 1, 'empty file still has one chunk');
+  assert.deepEqual(splitBytes(new Uint8Array([1, 2, 3, 4, 5]), 2).map((p) => [...p]), [[1, 2], [3, 4], [5]]);
+});
+
+test('documents: names, sizes and icons', () => {
+  assert.equal(fmtBytes(500), '500 B');
+  assert.equal(fmtBytes(2048), '2 KB');
+  assert.equal(fmtBytes(1.5 * 1024 * 1024), '1.5 MB');
+  assert.equal(safeName('C:\\Users\\me\\boarding<pass>.pdf'), 'boardingpass.pdf');
+  assert.equal(safeName(''), 'document');
+  const long = safeName(`${'x'.repeat(200)}.pdf`);
+  assert.equal(long.length, 80);
+  assert.ok(long.endsWith('.pdf'));
+  assert.ok(isPdf('', 'ticket.PDF'));
+  assert.equal(fileIcon('image/jpeg', 'a.jpg'), '🖼️');
+  assert.equal(fileIcon('application/pdf', 'a.pdf'), '📄');
+});
+
+// ---------- costs & budget ----------
+import { toHome, spreadCost, budgetSummary, parseAmount, guessCurrency, fmtMoney } from '../../travel-planner/js/budget.js';
+
+test('budget: amounts parse in common formats', () => {
+  assert.equal(parseAmount('1,234.50'), 1234.5);
+  assert.equal(parseAmount('1.234,50'), 1234.5);
+  assert.equal(parseAmount('12,5'), 12.5);
+  assert.equal(parseAmount('£80'), 80);
+  assert.equal(parseAmount('1,200'), 1200);
+  assert.equal(parseAmount(''), null);
+  assert.equal(parseAmount('abc'), null);
+  assert.equal(guessCurrency('en-GB'), 'GBP');
+  assert.equal(guessCurrency('de-DE'), 'EUR');
+  assert.equal(guessCurrency('xx'), 'USD');
+  assert.match(fmtMoney(12.5, 'GBP'), /12\.50/);
+});
+
+test('budget: currency conversion and spreading over nights', () => {
+  assert.equal(toHome(100, 'GBP', 'GBP'), 100);
+  assert.equal(toHome(100, 'EUR', 'GBP', { EUR: 0.85 }), 85);
+  assert.equal(toHome(100, 'USD', 'GBP', {}), null);
+  const s = spreadCost(hotel, 300);
+  assert.deepEqual(s, [{ date: '2026-12-01', amount: 100 }, { date: '2026-12-02', amount: 100 }, { date: '2026-12-03', amount: 100 }]);
+  assert.deepEqual(spreadCost(moma, 30), [{ date: '2026-12-02', amount: 30 }]);
+  assert.equal(spreadCost(car, 120).length, 3);
+});
+
+test('budget: summary totals, paid, by type and day, missing rates', () => {
+  const costed = [
+    { ...flight, cost: 500, currency: 'GBP', paid: true },
+    { ...hotel, cost: 300, currency: 'USD' },
+    { ...moma, cost: 25, currency: 'EUR' },
+    car, drive,
+  ];
+  const b = budgetSummary(costed, { currency: 'GBP', budget: 1000, rates: { USD: 0.8 } });
+  assert.equal(b.total, 500 + 240);
+  assert.equal(b.paid, 500);
+  assert.equal(b.unpaid, 240);
+  assert.equal(b.remaining, 260);
+  assert.equal(b.byType.flight, 500);
+  assert.equal(b.byType.hotel, 240);
+  assert.equal(b.byDay['2026-12-01'], 500 + 80);
+  assert.deepEqual(b.missingRates, ['EUR']);
+  assert.deepEqual(b.uncosted.map((i) => i.id), ['c1', 'd1']);
+  assert.equal(b.rows.length, 3);
+  assert.equal(budgetSummary([], {}).budget, null);
+});
+
+// ---------- scanning ----------
+import { normalizeBookings, normalizeDateTime, placesToLocate, EXTRACT_SCHEMA } from '../../travel-planner/js/ai.js';
+
+test('scan: the extraction schema is strict (every property required, no extras)', () => {
+  const check = (s, path) => {
+    if (s.type === 'object') {
+      assert.equal(s.additionalProperties, false, `${path} must forbid extra properties`);
+      assert.deepEqual([...s.required].sort(), Object.keys(s.properties).sort(), `${path} must require every property`);
+      for (const [k, v] of Object.entries(s.properties)) check(v, `${path}.${k}`);
+    } else if (s.type === 'array') check(s.items, `${path}[]`);
+  };
+  check(EXTRACT_SCHEMA, 'root');
+});
+
+test('scan: dates and times are normalised with sensible defaults', () => {
+  assert.equal(normalizeDateTime('2026-12-01T9:05'), '2026-12-01T09:05');
+  assert.equal(normalizeDateTime('2026-12-01 14:30'), '2026-12-01T14:30');
+  assert.equal(normalizeDateTime('2026-12-01', '15:00'), '2026-12-01T15:00');
+  assert.equal(normalizeDateTime('1 Dec'), '');
+});
+
+test('scan: model output becomes booking drafts', () => {
+  const blank = { title: '', provider: '', number: '', ref: '', seat: '', start: '', end: '', place: { name: '', search: '' }, from: { name: '', search: '' }, to: { name: '', search: '' }, cost: '', currency: '', paid: false, notes: '' };
+  const drafts = normalizeBookings([
+    { ...blank, type: 'flight', provider: 'British Airways', number: 'BA 117', ref: 'XK9P2L', start: '2026-12-01T08:25', end: '2026-12-01T11:20',
+      from: { name: 'Heathrow Airport (LHR)', search: 'Heathrow Airport, London, UK' }, to: { name: 'JFK Airport (JFK)', search: 'JFK Airport, New York' }, cost: '1,240.00', currency: 'gbp', paid: true },
+    { ...blank, type: 'hotel', title: 'Hotel Penn', start: '2026-12-01', place: { name: 'Hotel Penn', search: '401 7th Ave, New York' }, cost: '612.5' },
+    { ...blank, type: 'car', provider: 'Hertz', start: '2026-12-02T14:00', from: { name: 'Hertz JFK', search: 'x' }, to: { name: 'Hertz JFK', search: 'x' } },
+    { ...blank, type: 'spaceship' },
+    { ...blank, type: 'activity', title: 'Show', start: '2026-12-02T19:30', end: '2026-12-02T18:00' },
+  ], { currency: 'USD' });
+  assert.equal(drafts.length, 4, 'unknown types are dropped');
+  const [f, h, c, a] = drafts;
+  assert.deepEqual(f.from, { name: 'Heathrow Airport (LHR)', search: 'Heathrow Airport, London, UK' });
+  assert.equal(f.cost, 1240);
+  assert.equal(f.currency, 'GBP');
+  assert.equal(f.paid, true);
+  assert.equal(f.ref, 'XK9P2L');
+  assert.equal(f.title, undefined, 'empty strings are not kept');
+  assert.equal(h.start, '2026-12-01T15:00');
+  assert.equal(h.end, '2026-12-02T11:00', 'hotel without check-out gets one night');
+  assert.equal(h.currency, 'USD', 'missing currency falls back to the trip currency');
+  assert.equal(h.paid, false);
+  assert.equal(c.to, undefined, 'same drop-off as pick-up is left empty');
+  assert.equal(c.end, '2026-12-03T14:00');
+  assert.equal(a.end, undefined, 'an end before the start is dropped');
+  assert.deepEqual(placesToLocate(f), ['from', 'to']);
+  assert.deepEqual(placesToLocate({ place: { name: 'x', lat: 1, lon: 2 } }), []);
+  assert.deepEqual(normalizeBookings(null), []);
+});

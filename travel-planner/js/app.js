@@ -8,6 +8,9 @@ import {
 import * as store from './store.js';
 import { searchPlaces, driveRoute, cachedRoute, currentPosition } from './geo.js';
 import { showMap, destroyMap } from './map.js';
+import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
+import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount } from './budget.js';
+import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError } from './ai.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -22,6 +25,7 @@ const S = {
   trip: null, // {id, kind}
   meta: {},
   items: [],
+  files: [], // attached documents (metadata only)
   exists: null,
   status: { state: 'idle' },
   close: null,
@@ -64,15 +68,22 @@ window.addEventListener('hashchange', () => render());
 
 // ---------- trips ----------
 
+const prefetched = new Set();
+
 function openTrip(id, kind) {
   if (S.close) S.close();
   S.trip = { id, kind };
-  S.meta = {}; S.items = []; S.exists = null; S.sig = '';
+  S.meta = {}; S.items = []; S.files = []; S.exists = null; S.sig = '';
   S.settings = store.setSettings({ currentTrip: id });
   S.close = store.backendFor(kind).open(id, (data) => {
-    S.meta = data.meta; S.items = data.items; S.exists = data.exists;
+    S.meta = data.meta; S.items = data.items; S.files = data.files || []; S.exists = data.exists;
+    S.onFiles?.();
+    if (kind === 'cloud' && navigator.onLine && S.files.length && !prefetched.has(id)) {
+      prefetched.add(id);
+      setTimeout(() => store.backendFor('cloud').prefetch(id, S.files).catch(() => {}), 3000);
+    }
     if (data.meta.name) store.rememberTrip({ id, name: data.meta.name, kind });
-    const sig = JSON.stringify([data.meta, data.items]);
+    const sig = JSON.stringify([data.meta, data.items, S.files.map((f) => [f.id, f.itemId])]);
     if (sig !== S.sig) { S.sig = sig; render({ fromData: true }); }
   }, (st) => { S.status = st; renderStatus(); });
   renderStatus();
@@ -90,7 +101,7 @@ async function write(fn) {
 async function createTrip({ name, start, end }) {
   const id = uid(22);
   const kind = store.cloudConfigured() ? 'cloud' : 'local';
-  const meta = cleanItem({ name: name || 'My trip', start, end, bufferPct: 10, createdAt: new Date().toISOString() });
+  const meta = cleanItem({ name: name || 'My trip', start, end, bufferPct: 10, currency: homeCurrency({}), createdAt: new Date().toISOString() });
   store.rememberTrip({ id, name: meta.name, kind });
   const p = store.backendFor(kind).create(id, meta);
   if (kind === 'local') await p; else p.catch((e) => toast(`Not saved: ${e.message}`));
@@ -157,6 +168,7 @@ function render({ fromData = false } = {}) {
     case 'plan': renderPlan(); break;
     case 'map': renderMap(r.arg); break;
     case 'trip': renderTripSettings(); break;
+    case 'budget': renderBudget(); break;
     default: renderToday(r.arg);
   }
   renderStatus();
@@ -193,8 +205,13 @@ function eventMeta(ev) {
   }
   if (it.ref && ['depart', 'checkin', 'pickup', 'activity'].includes(ev.kind)) bits.push(`Ref ${it.ref}`);
   if (it.seat && ev.kind === 'depart') bits.push(it.seat);
+  if (hasCost(it) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind)) {
+    bits.push(`${fmtMoney(Number(it.cost), it.currency || homeCurrency(S.meta))}${it.paid ? ' · paid' : ''}`);
+  }
   return bits;
 }
+
+const docCount = (itemId) => S.files.filter((f) => f.itemId === itemId).length;
 
 function eventRow(ev) {
   const def = TYPES[ev.item.type];
@@ -206,6 +223,7 @@ function eventRow(ev) {
       <span class="ev-icon" aria-hidden="true">${def.icon}</span>
       <span class="ev-body"><strong>${esc(ev.label)}</strong>
         ${eventMeta(ev).map((b) => `<span class="ev-meta">${esc(b)}</span>`).join('')}
+        ${docCount(ev.item.id) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-docs">📎 ${docCount(ev.item.id)} document${docCount(ev.item.id) === 1 ? '' : 's'}</span>` : ''}
         ${ev.item.notes && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-notes">${esc(ev.item.notes)}</span>` : ''}
       </span>
     </button></li>`;
@@ -444,6 +462,102 @@ async function renderMap(arg) {
   }
 }
 
+// ---------- Budget ----------
+
+function renderBudget() {
+  if (loadingOrMissing()) return;
+  const b = budgetSummary(S.items, S.meta);
+  const home = b.home;
+  const money = (n) => fmtMoney(n, home);
+  const pct = b.budget ? Math.min(100, Math.round((b.total / b.budget) * 100)) : null;
+  const over = b.budget !== null && b.total > b.budget;
+  const maxType = Math.max(1, ...Object.values(b.byType));
+  const span = tripSpan(S.meta, S.items);
+  const days = dateRange(span.start, span.end);
+  const maxDay = Math.max(1, ...Object.values(b.byDay));
+  const otherCurrencies = [...new Set([...b.rows.map((r) => r.currency), ...Object.keys(S.meta.rates || {})])].filter((c) => c !== home).sort();
+
+  main.innerHTML = `<h1>Budget</h1>
+    <section class="card budget-top">
+      <div class="kpis">
+        <div><span class="kpi-label">Planned spend</span><strong class="kpi">${esc(money(b.total))}</strong></div>
+        ${b.budget !== null ? `<div><span class="kpi-label">${over ? 'Over budget' : 'Left in budget'}</span><strong class="kpi ${over ? 'bad' : 'ok'}">${esc(money(Math.abs(b.remaining)))}</strong></div>` : ''}
+      </div>
+      ${b.budget !== null ? `<div class="meter ${over ? 'over' : ''}" role="img" aria-label="${pct}% of the ${esc(money(b.budget))} budget planned"><span style="width:${pct}%"></span></div>
+        <p class="muted small">${pct}% of ${esc(money(b.budget))} budget</p>` : '<p class="muted small">Set a total budget below to track what\'s left.</p>'}
+      <div class="kpis small-kpis">
+        <div><span class="kpi-label">Paid</span><strong>${esc(money(b.paid))}</strong></div>
+        <div><span class="kpi-label">Still to pay</span><strong>${esc(money(b.unpaid))}</strong></div>
+      </div>
+      ${b.missingRates.length ? `<p class="warn-box">Not counted yet: costs in ${b.missingRates.map(esc).join(', ')}. Add the exchange rate below.</p>` : ''}
+    </section>
+
+    ${b.total > 0 ? `<section class="card">
+      <h2>By category</h2>
+      <ul class="bars">${Object.entries(b.byType).filter(([, v]) => v > 0).sort((x, y) => y[1] - x[1]).map(([k, v]) => `
+        <li><span class="bar-label">${TYPES[k].icon} ${esc(TYPES[k].plural.replace(/^./, (c) => c.toUpperCase()))}</span>
+          <span class="bar" style="--c:${TYPES[k].color}"><span style="width:${Math.max(2, (v / maxType) * 100)}%"></span></span>
+          <span class="bar-value">${esc(money(v))}</span></li>`).join('')}</ul>
+    </section>
+    <section class="card">
+      <h2>By day</h2>
+      <p class="muted small">Hotel and car hire costs are spread across the nights and days they cover.</p>
+      <ul class="bars days">${days.map((d, i) => `
+        <li><a class="bar-label" href="#/today/${d}">Day ${i + 1} · ${esc(fmtDate(d))}</a>
+          <span class="bar" style="--c:var(--accent)"><span style="width:${b.byDay[d] ? Math.max(2, (b.byDay[d] / maxDay) * 100) : 0}%"></span></span>
+          <span class="bar-value">${b.byDay[d] ? esc(money(b.byDay[d])) : '—'}</span></li>`).join('')}</ul>
+      ${b.budget !== null && days.length ? `<p class="muted small">Average ${esc(money(b.total / days.length))} a day · budget allows ${esc(money(b.budget / days.length))} a day</p>` : ''}
+    </section>` : ''}
+
+    <section class="card">
+      <h2>Bookings</h2>
+      ${b.rows.length ? `<ul class="costs">${b.rows.map((r) => `<li>
+        <button type="button" class="cost-row" data-edit="${esc(r.item.id)}">
+          <span aria-hidden="true">${TYPES[r.item.type].icon}</span>
+          <span class="cost-name"><strong>${esc(r.title)}</strong><span class="muted small">${esc(fmtDate(datePart(r.item.start)))}${r.currency !== home ? ` · ${esc(fmtMoney(r.cost, r.currency))}` : ''}</span></span>
+          <span class="cost-amt">${r.value === null ? `<span class="muted">${esc(fmtMoney(r.cost, r.currency))}</span>` : esc(money(r.value))}
+            <span class="badge ${r.paid ? 'paidb' : ''}">${r.paid ? 'Paid' : 'To pay'}</span></span>
+        </button></li>`).join('')}</ul>` : '<p class="muted">No costs yet. Open a booking and fill in its cost.</p>'}
+      ${b.uncosted.length ? `<details class="uncosted"><summary>${b.uncosted.length} booking${b.uncosted.length === 1 ? '' : 's'} without a cost</summary>
+        <ul class="costs">${b.uncosted.map((it) => `<li><button type="button" class="cost-row" data-edit="${esc(it.id)}">
+          <span aria-hidden="true">${TYPES[it.type].icon}</span><span class="cost-name"><strong>${esc(itemTitle(it))}</strong><span class="muted small">${esc(fmtDate(datePart(it.start)))}</span></span>
+          <span class="cost-amt link">Add cost</span></button></li>`).join('')}</ul></details>` : ''}
+    </section>
+
+    <section class="card">
+      <h2>Budget settings</h2>
+      <form id="budget-form" class="form">
+        <div class="two">
+          <label>Home currency<select name="currency">${[...new Set([home, ...CURRENCIES])].map((c) => `<option ${c === home ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+          <label>Total budget<input name="budget" inputmode="decimal" placeholder="optional" value="${esc(b.budget ?? '')}"></label>
+        </div>
+        ${otherCurrencies.length ? `<fieldset class="rates"><legend>Exchange rates</legend>
+          ${otherCurrencies.map((c) => `<label class="rate">1 ${esc(c)} =<input name="rate-${esc(c)}" inputmode="decimal" value="${esc(S.meta.rates?.[c] ?? '')}" placeholder="?" aria-label="${esc(home)} for 1 ${esc(c)}"> ${esc(home)}</label>`).join('')}
+          <p class="muted small">Look up today's rate in your bank app or a search engine.</p></fieldset>` : ''}
+        <button class="btn">Save</button>
+        <p class="muted small">Shared with everyone on the trip.</p>
+      </form>
+    </section>`;
+
+  $('#budget-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const budget = parseAmount(fd.get('budget'));
+    if (String(fd.get('budget')).trim() && budget === null) { toast('Budget must be a number'); return; }
+    const rates = {};
+    for (const c of otherCurrencies) {
+      const r = parseAmount(fd.get(`rate-${c}`));
+      if (r !== null && r > 0) rates[c] = r;
+    }
+    const currency = fd.get('currency');
+    if (currency !== home && Object.keys(rates).length) {
+      if (!confirm(`Changing the home currency to ${currency} — remember to update the exchange rates to be in ${currency}.`)) return;
+    }
+    await write((bk, id) => bk.saveMeta(id, { currency, budget: budget ?? 0, rates }));
+    toast('Budget saved');
+  };
+}
+
 // ---------- Trip settings ----------
 
 function renderTripSettings() {
@@ -491,12 +605,29 @@ function renderTripSettings() {
       </form>
     </section>
     <section class="card">
+      <h2>Documents</h2>
+      ${S.files.length ? `<div id="all-docs"></div>` : '<p class="muted">Tickets, booking confirmations and photos you attach to bookings appear here.</p>'}
+    </section>
+    <section class="card" id="scan-settings">
+      <h2>Scanning bookings</h2>
+      <p>Scan a photo, screenshot, PDF or confirmation email and the app fills in the booking for you, and turns photos of documents into text. This uses Claude (by Anthropic) with your own API key.</p>
+      ${S.settings.aiKey ? `<p>✅ Scanning is on for this device (key ending …${esc(S.settings.aiKey.slice(-4))}).</p>
+        <button type="button" class="btn ghost danger" id="ai-off">Remove key from this device</button>`
+        : `<ol class="steps small">
+          <li>Sign in at <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> and add some credit (each scan costs a few cents).</li>
+          <li>Go to <strong>API keys → Create key</strong> and copy it.</li>
+          <li>Paste it here. It stays on this device only and is never shared with the trip.</li></ol>
+        <form id="ai-form" class="form"><label>API key<input name="key" type="password" autocomplete="off" placeholder="sk-ant-…" required></label>
+        <button class="btn">Turn on scanning</button></form>`}
+    </section>
+    <section class="card">
       <h2>Export</h2>
       <div class="stack">
         <button type="button" class="btn ghost" id="ics">📅 Add to my calendar (.ics)</button>
         <button type="button" class="btn ghost" id="backup">⬇️ Download backup (JSON)</button>
         <label class="btn ghost filebtn">⬆️ Import a backup into this trip<input type="file" id="import" accept="application/json,.json"></label>
       </div>
+      ${S.files.length ? '<p class="muted small">The backup file contains your plans but not the attached documents.</p>' : ''}
     </section>
     <section class="card">
       <h2>Trips</h2>
@@ -507,6 +638,15 @@ function renderTripSettings() {
     </section>
     <p class="muted small center">Maps © OpenStreetMap contributors · Routes by OSRM · Place search by Nominatim</p>`;
 
+  const all = $('#all-docs');
+  if (all) {
+    const byItem = new Map();
+    for (const f of S.files) byItem.set(f.itemId, [...(byItem.get(f.itemId) || []), f]);
+    const groups = [...byItem.entries()].map(([itemId, files]) => ({ item: S.items.find((i) => i.id === itemId), files }))
+      .sort((a, b) => (a.item?.start || '~').localeCompare(b.item?.start || '~'));
+    all.innerHTML = groups.map((g, i) => `<div class="docgroup"><h3>${g.item ? `${TYPES[g.item.type].icon} ${esc(itemTitle(g.item))} <span class="muted small">${esc(fmtDate(datePart(g.item.start)))}</span>` : 'Deleted booking'}</h3><ul class="doclist" data-group="${i}"></ul></div>`).join('');
+    groups.forEach((g, i) => renderDocList($(`[data-group="${i}"]`, all), g.files));
+  }
   $('#meta-form').onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -516,6 +656,17 @@ function renderTripSettings() {
     store.rememberTrip({ id: S.trip.id, name: patch.name, kind: S.trip.kind });
     toast('Trip saved');
   };
+  const aiForm = $('#ai-form');
+  if (aiForm) aiForm.onsubmit = (e) => {
+    e.preventDefault();
+    const key = new FormData(aiForm).get('key').trim();
+    if (!/^sk-ant-[\w-]{10,}$/.test(key)) { toast('That doesn\'t look like an Anthropic API key (it starts with sk-ant-)'); return; }
+    S.settings = store.setSettings({ aiKey: key });
+    toast('Scanning is on');
+    render();
+  };
+  const aiOff = $('#ai-off');
+  if (aiOff) aiOff.onclick = () => { S.settings = store.setSettings({ aiKey: '' }); toast('Key removed from this device'); render(); };
   $('#prefs').onchange = (e) => {
     const fd = new FormData(e.currentTarget);
     S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit') });
@@ -641,16 +792,18 @@ function closeSheet() { if (sheet.open) sheet.close(); }
 sheet.addEventListener('click', (e) => {
   if (e.target === sheet || e.target.closest('[data-close]')) closeSheet();
 });
-sheet.addEventListener('close', () => { sheetBody.innerHTML = ''; });
+sheet.addEventListener('close', () => { sheetBody.innerHTML = ''; S.onFiles = null; });
 
 $('#fab').onclick = () => openAddChooser();
 
 function openAddChooser() {
   openSheet(`<div class="sheet-head"><h2>Add to the plan</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    <button type="button" class="scan-cta" data-scan><span aria-hidden="true">✨</span><span><strong>Scan a booking</strong><small>Photo, screenshot, PDF or pasted email — fills in the details for you</small></span></button>
     <div class="typegrid">${Object.entries(TYPES).map(([k, d]) => `<button type="button" data-type="${k}" style="--c:${d.color}"><span aria-hidden="true">${d.icon}</span>${esc(d.label)}</button>`).join('')}
     <button type="button" data-calc style="--c:${TYPES.drive.color}"><span aria-hidden="true">⏱️</span>Drive time calculator</button></div>`, 'Add to the plan');
   $$('[data-type]', sheetBody).forEach((b) => { b.onclick = () => openItemForm(b.dataset.type); });
   $('[data-calc]', sheetBody).onclick = () => openDriveCalc();
+  $('[data-scan]', sheetBody).onclick = () => openScan();
 }
 
 // Place picker: search (Nominatim), places already in the trip, or current location.
@@ -714,9 +867,11 @@ function defaultTimes(type) {
   }
 }
 
-function openItemForm(type, existing, prefill = {}) {
+function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], onSaved } = {}) {
   const def = TYPES[type];
-  const draft = existing ? JSON.parse(JSON.stringify(existing)) : { type, id: uid(16), ...defaultTimes(type), ...prefill };
+  // Pre-filled (scanned) bookings keep only what was read; blank forms get sensible default times.
+  const base = Object.keys(prefill).length ? {} : defaultTimes(type);
+  const draft = existing ? JSON.parse(JSON.stringify(existing)) : { type, id: uid(16), ...base, ...prefill };
   const fieldHtml = def.fields.map((f) => {
     const v = draft[f.key] ?? '';
     const req = f.required ? ' required' : '';
@@ -726,6 +881,13 @@ function openItemForm(type, existing, prefill = {}) {
       case 'datetime': return `<label>${lbl}<input type="datetime-local" name="${f.key}" value="${esc(v)}"${req}></label>`;
       case 'number': return `<label>${lbl}<input type="number" inputmode="numeric" min="0" step="5" name="${f.key}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}"></label>`;
       case 'textarea': return `<label>${lbl}<textarea name="${f.key}" rows="3">${esc(v)}</textarea></label>`;
+      case 'money': {
+        const cur = draft.currency || homeCurrency(S.meta);
+        const opts = [...new Set([homeCurrency(S.meta), cur, ...Object.keys(S.meta.rates || {}), ...CURRENCIES])];
+        return `<div class="money"><label>${lbl}<input name="cost" inputmode="decimal" autocomplete="off" placeholder="0.00" value="${esc(v)}"></label>
+          <label><span>Currency</span><select name="currency">${opts.map((c) => `<option ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label></div>`;
+      }
+      case 'checkbox': return `<label class="check"><input type="checkbox" name="${f.key}" ${v ? 'checked' : ''}> <span>${esc(f.label)}</span></label>`;
       default: return `<label>${lbl}<input name="${f.key}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}"${req} autocomplete="off"></label>`;
     }
   }).join('');
@@ -736,6 +898,7 @@ function openItemForm(type, existing, prefill = {}) {
       <button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
     ${fieldHtml}
     ${type === 'drive' ? '<div class="routebox" id="routebox" role="status" aria-live="polite"></div>' : ''}
+    <section class="docs" id="docs" aria-label="Documents"></section>
     <p class="error" id="form-err" role="alert" hidden></p>
     <div class="row sticky-actions">
       ${existing ? '<button type="button" class="btn danger ghost" id="del-item">Delete</button>' : ''}
@@ -750,6 +913,13 @@ function openItemForm(type, existing, prefill = {}) {
   const readInputs = () => {
     for (const f of def.fields) {
       if (f.kind === 'place') continue;
+      if (f.kind === 'checkbox') { draft[f.key] = !!form.elements[f.key]?.checked; continue; }
+      if (f.kind === 'money') {
+        const amt = parseAmount(form.elements.cost.value);
+        draft.cost = amt === null ? '' : amt;
+        draft.currency = form.elements.currency.value;
+        continue;
+      }
       const v = form.elements[f.key]?.value ?? '';
       draft[f.key] = f.kind === 'number' ? (v === '' ? '' : Number(v)) : v;
     }
@@ -792,6 +962,21 @@ function openItemForm(type, existing, prefill = {}) {
     const f = def.fields.find((x) => x.key === el.dataset.place);
     mountPlace(el, { label: f.label, value: draft[f.key], required: f.required, onChange: (p) => { draft[f.key] = p; updateRoute(); } });
   });
+  // Moving the start keeps the same duration, so the end never ends up before the start.
+  if (form.elements.start && form.elements.end) {
+    let prevStart = form.elements.start.value;
+    form.elements.start.addEventListener('change', () => {
+      const st = form.elements.start.value, en = form.elements.end.value;
+      if (st && en && prevStart) form.elements.end.value = addMinutes(en, diffMinutes(prevStart, st));
+      else if (st && en && en < st) form.elements.end.value = '';
+      prevStart = st;
+    });
+  }
+
+  // New bookings keep picked files until Save; existing ones upload straight away.
+  const pending = prefillDocs.map((p) => ({ ...p, id: uid(8) }));
+  const docs = mountDocs($('#docs'), { itemId: draft.id, pending: existing ? null : pending });
+
   if (type === 'drive') {
     form.elements.start.addEventListener('change', updateRoute);
     form.elements.stopMin.addEventListener('change', updateRoute);
@@ -803,12 +988,17 @@ function openItemForm(type, existing, prefill = {}) {
     readInputs();
     const errs = validateItem(draft);
     const errEl = $('#form-err');
+    if (form.elements.cost && form.elements.cost.value.trim() && parseAmount(form.elements.cost.value) === null) errs.push('Cost must be a number');
+    if (!hasCost(draft)) { delete draft.currency; draft.paid = false; }
     if (errs.length) { errEl.textContent = errs.join('. '); errEl.hidden = false; errEl.scrollIntoView({ block: 'nearest' }); return; }
     if (type === 'drive' && !draft.route && hasCoords(draft.from) && hasCoords(draft.to)) await updateRoute().catch(() => {});
     if (type === 'car' && draft.to && draft.from && draft.to.name === draft.from.name) delete draft.to;
     const item = cleanItem({ ...draft, updatedAt: new Date().toISOString(), updatedBy: S.settings.name });
     $('#save-item').disabled = true;
     try { await write((b, id) => b.saveItem(id, item)); } catch { $('#save-item').disabled = false; return; }
+    for (const p of pending) uploadDoc(item.id, p);
+    // The scan flow continues in the same dialog, so it closes it itself.
+    if (onSaved) { onSaved(item); return; }
     closeSheet();
     toast(existing ? 'Saved' : `${def.label} added`);
     const d = datePart(item.start);
@@ -819,7 +1009,14 @@ function openItemForm(type, existing, prefill = {}) {
     if (!confirm(`Delete "${itemTitle(existing)}"?`)) return;
     await write((b, id) => b.deleteItem(id, existing.id));
     closeSheet();
-    toast('Deleted', { label: 'Undo', run: () => write((b, id) => b.saveItem(id, existing)) });
+    let undone = false;
+    const tripId = S.trip.id;
+    toast('Deleted', { label: 'Undo', run: () => { undone = true; write((b, id) => b.saveItem(id, existing)); } });
+    // Remove its documents once the chance to undo has passed.
+    setTimeout(() => {
+      if (undone || S.trip?.id !== tripId || S.items.some((i) => i.id === existing.id)) return;
+      for (const f of S.files.filter((x) => x.itemId === existing.id)) write((b, id) => b.deleteFile(id, f)).catch(() => {});
+    }, 8000);
   };
 }
 
@@ -867,6 +1064,277 @@ function openDriveCalc() {
       route: route && { ...route, from: `${st.from.lat},${st.from.lon}`, to: `${st.to.lat},${st.to.lon}` },
     });
   };
+}
+
+// ---------- scanning (Claude) ----------
+
+let lastScan = null; // {drafts, docs, added:Set} kept while the app is open
+
+function openScan() {
+  if (!S.settings.aiKey) {
+    openSheet(`<div class="sheet-head"><h2>✨ Scan a booking</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+      <p>Scanning reads photos, screenshots, PDFs and confirmation emails and fills in the booking for you. It uses Claude with your own Anthropic API key, which you add once on this device.</p>
+      <div class="row"><a class="btn" href="#/trip" data-close id="go-setup">Set up scanning</a></div>`, 'Scan a booking');
+    $('#go-setup').onclick = () => { closeSheet(); go('#/trip'); setTimeout(() => $('#scan-settings')?.scrollIntoView({ block: 'start' }), 50); };
+    return;
+  }
+  if (lastScan && lastScan.drafts.some((_, i) => !lastScan.added.has(i))) { showScanResults(); return; }
+  openSheet(`<div class="form">
+    <div class="sheet-head"><h2>✨ Scan a booking</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    <label class="btn filebtn scan-pick">📷 Take a photo or choose a screenshot / PDF<input type="file" id="scan-file" accept="image/*,application/pdf,.pdf,.txt,.eml,.html,.htm"></label>
+    <p class="center muted small">or</p>
+    <label>Paste a confirmation email<textarea id="scan-text" rows="6" placeholder="Paste the whole email here"></textarea></label>
+    <button type="button" class="btn" id="scan-go">Read booking</button>
+    <p class="muted small" id="scan-status" role="status" aria-live="polite"></p>
+    <p class="muted small">The document is sent to Anthropic's Claude to read it. Check the details before saving.</p>
+  </div>`, 'Scan a booking');
+  const run = async (input, doc) => {
+    const status = $('#scan-status');
+    const btn = $('#scan-go');
+    btn.disabled = true;
+    status.textContent = 'Reading… this usually takes 10–30 seconds.';
+    try {
+      const span = tripSpan(S.meta, S.items);
+      const res = await extractBookings(S.settings.aiKey, input, {
+        tripName: S.meta.name, start: span.start, end: span.end, today: localDate(), currency: homeCurrency(S.meta),
+      });
+      const drafts = normalizeBookings(res.bookings, { currency: homeCurrency(S.meta) });
+      if (doc && res.text) doc.text = res.text;
+      if (!drafts.length) {
+        status.textContent = res.text ? 'No bookings found in it. You can still attach it to a booking — its text has been read.' : 'No bookings found in it. Try a clearer photo, or paste the email text.';
+        btn.disabled = false;
+        return;
+      }
+      status.textContent = 'Finding places on the map…';
+      for (const d of drafts) {
+        for (const k of placesToLocate(d)) {
+          try {
+            const [hit] = await searchPlaces(d[k].search || d[k].name);
+            if (hit) d[k] = { name: d[k].name, lat: hit.lat, lon: hit.lon };
+          } catch { /* keep the name without a map location */ }
+          if (d[k]) delete d[k].search;
+        }
+      }
+      lastScan = { drafts, docs: doc ? [doc] : [], added: new Set() };
+      showScanResults();
+    } catch (err) {
+      status.textContent = friendlyError(err);
+      status.className = 'error small';
+      btn.disabled = false;
+    }
+  };
+  $('#scan-file').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    let doc;
+    try { doc = await prepareFile(file); } catch (err) { $('#scan-status').textContent = err.message; return; }
+    run({ blob: file }, doc);
+  };
+  $('#scan-go').onclick = () => {
+    const text = $('#scan-text').value.trim();
+    if (text.length < 20) { $('#scan-status').textContent = 'Take a photo, choose a file, or paste the email text first.'; return; }
+    const blob = new Blob([text], { type: 'text/plain' });
+    run({ text }, { blob, name: 'Confirmation email.txt', type: 'text/plain', size: blob.size, text });
+  };
+}
+
+function showScanResults() {
+  const { drafts, docs, added } = lastScan;
+  const left = drafts.map((d, i) => ({ d, i })).filter(({ i }) => !added.has(i));
+  const ready = left.filter(({ d }) => !validateItem(d).length);
+  openSheet(`<div class="form">
+    <div class="sheet-head"><h2>✨ Found ${drafts.length} booking${drafts.length === 1 ? '' : 's'}</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    <ul class="scan-list">${drafts.map((d, i) => {
+      const errs = validateItem(d);
+      const missingMap = placesToLocate(d).length;
+      return `<li class="${added.has(i) ? 'done' : ''}">
+        <span class="scan-icon" aria-hidden="true">${TYPES[d.type].icon}</span>
+        <span class="scan-body"><strong>${esc(itemTitle(d))}</strong>
+          <span class="muted small">${d.start ? esc(`${fmtDate(datePart(d.start))} ${t12(timePart(d.start))}`) : 'No date'}${d.ref ? ` · Ref ${esc(d.ref)}` : ''}${hasCost(d) ? ` · ${esc(fmtMoney(d.cost, d.currency))}` : ''}</span>
+          ${added.has(i) ? '<span class="ok small">✓ Added</span>' : errs.length ? `<span class="error small">Missing ${esc(errs.map((e) => e.replace(/ is required$/, '').toLowerCase()).join(', '))} — tap Review</span>` : missingMap ? '<span class="muted small">Some places aren\'t on the map yet</span>' : ''}</span>
+        ${added.has(i) ? '' : `<button type="button" class="btn small ghost" data-review="${i}">Review</button>`}
+      </li>`;
+    }).join('')}</ul>
+    ${docs.length ? `<p class="muted small">📎 ${esc(docs[0].name)} will be attached to each booking${docs[0].text && docs[0].type.startsWith('image/') ? ', with its text' : ''}.</p>` : ''}
+    <div class="row">
+      <button type="button" class="btn ghost" id="scan-new">Scan something else</button>
+      <span class="grow"></span>
+      ${ready.length ? `<button type="button" class="btn" id="scan-all">${ready.length === 1 ? 'Add booking' : ready.length === left.length ? `Add all ${ready.length}` : `Add the ${ready.length} ready`}</button>` : ''}
+    </div>
+  </div>`, 'Scanned bookings');
+  $$('[data-review]', sheetBody).forEach((b) => {
+    b.onclick = () => {
+      const i = +b.dataset.review;
+      openItemForm(drafts[i].type, null, drafts[i], {
+        docs,
+        onSaved: () => {
+          added.add(i);
+          toast('Booking added');
+          if (drafts.some((_, j) => !added.has(j))) showScanResults();
+          else { lastScan = null; closeSheet(); }
+        },
+      });
+    };
+  });
+  $('#scan-new').onclick = () => { lastScan = null; openScan(); };
+  const all = $('#scan-all');
+  if (all) all.onclick = async () => {
+    all.disabled = true;
+    for (const { d, i } of ready) {
+      const item = cleanItem({ ...d, id: uid(16), updatedAt: new Date().toISOString(), updatedBy: S.settings.name });
+      try { await write((b, id) => b.saveItem(id, item)); } catch { all.disabled = false; return; }
+      for (const doc of docs) uploadDoc(item.id, doc);
+      added.add(i);
+    }
+    const n = ready.length;
+    if (drafts.some((_, j) => !added.has(j))) showScanResults();
+    else { lastScan = null; closeSheet(); }
+    toast(`${n} booking${n === 1 ? '' : 's'} added`);
+    const first = ready[0]?.d.start;
+    if (first && parseRoute().name !== 'plan') go(`#/today/${datePart(first)}`);
+  };
+}
+
+// ---------- documents ----------
+
+const blobCache = new Map(); // fileId -> Blob, for this session
+const urlCache = new Map(); // fileId -> object URL (one per file, kept while the app is open)
+function urlFor(f, blob) {
+  if (!urlCache.has(f.id)) urlCache.set(f.id, URL.createObjectURL(blob));
+  return urlCache.get(f.id);
+}
+
+async function loadDoc(f) {
+  if (blobCache.has(f.id)) return blobCache.get(f.id);
+  const blob = await backend().getFile(S.trip.id, f);
+  blobCache.set(f.id, blob);
+  return blob;
+}
+
+function uploadDoc(itemId, p) {
+  const meta = cleanItem({
+    id: uid(20), itemId, name: p.name, type: p.type, size: p.size, text: p.text ? String(p.text).slice(0, 50000) : '',
+    addedBy: S.settings.name, addedAt: new Date().toISOString(),
+  });
+  blobCache.set(meta.id, p.blob);
+  return write((b, id) => b.addFile(id, meta, p.blob)).catch(() => blobCache.delete(meta.id));
+}
+
+/** List of documents with View / Share / Delete. */
+function renderDocList(ul, files, { onRemovePending } = {}) {
+  ul.innerHTML = files.map((f, i) => `<li class="doc" data-i="${i}">
+    <div class="doc-row">
+      <span class="doc-icon" aria-hidden="true">${fileIcon(f.type, f.name)}</span>
+      <span class="doc-name"><strong>${esc(f.name)}</strong>
+        <span class="muted small">${esc(fmtBytes(f.size))}${f.pending ? ' · uploads when you save' : ''}${f.addedBy ? ` · added by ${esc(f.addedBy)}` : ''}</span></span>
+      ${f.pending ? '' : `<button type="button" class="btn small ghost" data-doc="view" aria-label="View ${esc(f.name)}">View</button>`}
+      <button type="button" class="iconbtn small" data-doc="del" aria-label="Remove ${esc(f.name)}">🗑</button>
+    </div>
+    <div class="doc-view" hidden></div>
+  </li>`).join('');
+  ul.onclick = async (e) => {
+    const b = e.target.closest('[data-doc]');
+    if (!b) return;
+    const li = b.closest('.doc');
+    const f = files[+li.dataset.i];
+    if (b.dataset.doc === 'del') {
+      if (f.pending) { onRemovePending?.(f); return; }
+      if (!confirm(`Remove "${f.name}" for everyone on this trip?`)) return;
+      blobCache.delete(f.id);
+      if (urlCache.has(f.id)) { URL.revokeObjectURL(urlCache.get(f.id)); urlCache.delete(f.id); }
+      write((bk, id) => bk.deleteFile(id, f)).catch(() => {});
+      toast('Document removed');
+      return;
+    }
+    const view = $('.doc-view', li);
+    if (!view.hidden) { view.hidden = true; return; }
+    view.hidden = false;
+    view.innerHTML = '<p class="muted small" role="status">Loading…</p>';
+    try {
+      const blob = await loadDoc(f);
+      const url = urlFor(f, blob);
+      const file = typeof File === 'function' ? new File([blob], f.name, { type: f.type }) : null;
+      const canShare = !!(file && navigator.canShare && navigator.canShare({ files: [file] }));
+      view.innerHTML = `${isImage(f.type) ? `<img src="${url}" alt="${esc(f.name)}">` : ''}
+        <div class="row">
+          <a class="btn small" href="${url}" target="_blank" rel="noopener">Open</a>
+          ${canShare ? '<button type="button" class="btn small ghost" data-share>Share / Save to Files</button>' : `<a class="btn small ghost" href="${url}" download="${esc(f.name)}">Download</a>`}
+        </div>`;
+      const sh = $('[data-share]', view);
+      if (sh) sh.onclick = () => navigator.share({ files: [file], title: f.name }).catch(() => {});
+      renderDocText(view, f, blob);
+    } catch (err) {
+      view.innerHTML = `<p class="error small">${esc(err.message)}</p>`;
+    }
+  };
+}
+
+/** The document's text (from scanning), or a button to get it. */
+function renderDocText(view, f, blob) {
+  const box = document.createElement('div');
+  box.className = 'doc-text';
+  view.append(box);
+  const canRead = /^image\/|application\/pdf/.test(f.type || '') || /\.pdf$/i.test(f.name);
+  if (f.text) {
+    box.innerHTML = `<details><summary>Text in this document</summary><pre></pre>
+      <button type="button" class="btn small ghost" data-copy>Copy text</button></details>`;
+    $('pre', box).textContent = f.text;
+    $('[data-copy]', box).onclick = () => navigator.clipboard.writeText(f.text).then(() => toast('Text copied'), () => toast('Couldn\'t copy'));
+  } else if (canRead && S.settings.aiKey) {
+    box.innerHTML = '<button type="button" class="btn small ghost" data-gettext>📝 Get the text from this document</button>';
+    $('[data-gettext]', box).onclick = async (e) => {
+      e.target.disabled = true;
+      e.target.textContent = 'Reading… (usually 10–30 seconds)';
+      try {
+        const text = (await transcribe(S.settings.aiKey, blob)).slice(0, 50000);
+        f.text = text;
+        await write((b, id) => b.updateFile(id, { id: f.id, text }));
+        box.remove();
+        renderDocText(view, f, blob);
+        $('details', view)?.setAttribute('open', '');
+      } catch (err) {
+        e.target.disabled = false;
+        e.target.textContent = '📝 Get the text from this document';
+        toast(friendlyError(err));
+      }
+    };
+  }
+}
+
+/** Documents section inside a booking form. */
+function mountDocs(el, { itemId, pending }) {
+  let lastSig = null;
+  const draw = () => {
+    const sig = JSON.stringify([S.files.filter((f) => f.itemId === itemId).map((f) => f.id), (pending || []).map((p) => p.id)]);
+    if (sig === lastSig) return;
+    lastSig = sig;
+    const saved = S.files.filter((f) => f.itemId === itemId).sort((a, b) => (a.addedAt || '').localeCompare(b.addedAt || ''));
+    const list = [...saved, ...(pending || []).map((p) => ({ ...p, pending: true }))];
+    el.innerHTML = `<h3>Documents</h3>
+      ${list.length ? '<ul class="doclist"></ul>' : '<p class="muted small">Attach tickets, booking confirmations or photos (PDF, images and more, up to 10 MB each).</p>'}
+      <p class="muted small" data-busy role="status" hidden>Preparing…</p>
+      <label class="btn ghost small filebtn">📎 Add document<input type="file" multiple accept="${ACCEPT}" aria-label="Add document"></label>`;
+    const ul = $('.doclist', el);
+    if (ul) renderDocList(ul, list, { onRemovePending: (f) => { pending.splice(pending.findIndex((p) => p.id === f.id), 1); draw(); } });
+    $('input[type=file]', el).onchange = async (e) => {
+      const picked = [...e.target.files];
+      e.target.value = '';
+      if (!picked.length) return;
+      $('[data-busy]', el).hidden = false;
+      for (const file of picked) {
+        try {
+          const p = await prepareFile(file);
+          if (pending) pending.push({ ...p, id: uid(8) });
+          else { uploadDoc(itemId, p); toast(`Added ${p.name}`); }
+        } catch (err) { toast(err.message); }
+      }
+      draw();
+    };
+  };
+  S.onFiles = draw;
+  draw();
+  return { draw };
 }
 
 // ---------- start ----------

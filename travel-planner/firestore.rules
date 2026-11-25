@@ -23,6 +23,23 @@ service cloud.firestore {
           && request.resource.data.type in ['flight', 'hotel', 'car', 'drive', 'activity', 'transport'];
         allow delete: if signedIn() && validTripId(tripId);
       }
+
+      // Attached documents: an entry per file, with the bytes split into chunks.
+      match /files/{fileId} {
+        allow read, delete: if signedIn() && validTripId(tripId);
+        allow create, update: if signedIn() && validTripId(tripId)
+          && fileId.size() <= 40
+          && request.resource.data.size() < 20
+          && request.resource.data['size'] is int
+          && request.resource.data['size'] <= 10485760;
+
+        match /chunks/{chunkId} {
+          allow read, delete: if signedIn() && validTripId(tripId);
+          allow create, update: if signedIn() && validTripId(tripId)
+            && request.resource.data.b is bytes
+            && request.resource.data.b.size() <= 1000000;
+        }
+      }
     }
   }
 }

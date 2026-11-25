@@ -23,6 +23,8 @@ const PLACES = {
   jfk: { name: 'John F. Kennedy International Airport', display_name: 'John F. Kennedy International Airport, Queens, New York, USA', lat: '40.6413', lon: '-73.7781' },
 };
 
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64');
+
 function encode(points) {
   let out = '', pl = 0, pn = 0;
   const enc = (v) => { v = v < 0 ? ~(v << 1) : v << 1; let s = ''; while (v >= 0x20) { s += String.fromCharCode((0x20 | (v & 0x1f)) + 63); v >>= 5; } return s + String.fromCharCode(v + 63); };
@@ -63,7 +65,7 @@ async function main() {
       const d = km(coords[0], coords[1]) * 1.3; // road km
       route.fulfill({ json: { code: 'Ok', routes: [{ duration: d * 60 + 300, distance: d * 1000, geometry: encode(coords) }] } });
     });
-    await context.route('https://tile.openstreetmap.org/**', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64') }));
+    await context.route('https://tile.openstreetmap.org/**', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
 
     const page = await context.newPage();
     const errors = [];
@@ -143,6 +145,41 @@ async function main() {
       await shot(page, '03-today');
     });
 
+    await check('attach documents to a booking, view them, add and remove more', async () => {
+      // A new booking keeps picked files until Save.
+      await add('Activity');
+      await page.getByLabel('What').fill('Broadway show');
+      await page.getByLabel('Starts').fill('2026-12-02T19:30');
+      await page.locator('#docs input[type=file]').setInputFiles([
+        { name: 'tickets.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 fake ticket') },
+        { name: 'seat-map.png', mimeType: 'image/png', buffer: PNG },
+      ]);
+      await page.locator('#docs').getByText('uploads when you save').first().waitFor();
+      assert.equal(await page.locator('#docs .doc').count(), 2);
+      await save();
+      const ev = page.locator('.ev', { hasText: 'Broadway show' });
+      await ev.getByText('📎 2 documents').waitFor();
+      // Open the booking: view the image, add one more, remove the PDF.
+      await ev.click();
+      await page.getByRole('button', { name: 'View seat-map.png' }).click();
+      await page.locator('.doc-view img').waitFor();
+      assert.match(await page.locator('.doc-view a', { hasText: 'Open' }).getAttribute('href'), /^blob:/);
+      await shot(page, '03b-docs');
+      await page.locator('#docs input[type=file]').setInputFiles({ name: 'receipt.txt', mimeType: 'text/plain', buffer: Buffer.from('paid') });
+      await page.locator('#docs').getByText('receipt.txt').waitFor();
+      page.once('dialog', (d) => d.accept());
+      await page.getByRole('button', { name: 'Remove tickets.pdf' }).click();
+      await page.getByRole('button', { name: 'Remove tickets.pdf' }).waitFor({ state: 'detached' });
+      assert.equal(await page.locator('#docs .doc').count(), 2);
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+      await ev.getByText('📎 2 documents').waitFor();
+      // Files over the limit are refused.
+      await ev.click();
+      await page.locator('#docs input[type=file]').setInputFiles({ name: 'huge.pdf', mimeType: 'application/pdf', buffer: Buffer.alloc(11 * 1024 * 1024) });
+      await page.getByText(/The limit is 10 MB/).waitFor();
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+    });
+
     await check('a plan you can\'t reach in time is flagged', async () => {
       await add('Activity');
       await page.getByLabel('What').fill('Lunch in Boston');
@@ -212,9 +249,50 @@ async function main() {
       await shot(page, '08-map-day2');
     });
 
+    await check('costs on bookings and the budget screen', async () => {
+      // Hotel in GBP (paid), MoMA in USD (needs a rate).
+      await page.goto(`${BASE}#/today/2026-12-02`);
+      await page.getByRole('button', { name: /Staying at|Pick up car/ }).first().waitFor().catch(() => {});
+      await page.goto(`${BASE}#/plan`);
+      await page.getByRole('button', { name: /Check in · Hotel Penn/ }).click();
+      await page.getByLabel('Cost', { exact: true }).fill('600');
+      await page.getByLabel('Currency').selectOption('GBP');
+      await page.getByLabel('Already paid').check();
+      await save();
+      await page.getByRole('button', { name: /MoMA/ }).first().click();
+      await page.getByLabel('Cost', { exact: true }).fill('50');
+      await page.getByLabel('Currency').selectOption('USD');
+      await save();
+      await page.getByText('£600.00 · paid').first().waitFor();
+      await page.getByRole('link', { name: 'Budget' }).click();
+      await page.getByRole('heading', { name: 'Budget', level: 1 }).waitFor();
+      // The trip's home currency was set when it was created (USD on this test phone).
+      assert.equal(await page.getByLabel('Home currency').inputValue(), 'USD');
+      await page.getByLabel('Home currency').selectOption('GBP');
+      await page.getByLabel('Total budget').fill('1000');
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await page.getByText('Not counted yet: costs in USD').waitFor();
+      await page.getByLabel('GBP for 1 USD').fill('0.8');
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await page.getByText('Budget saved').waitFor();
+      await page.locator('.kpi', { hasText: '£640.00' }).waitFor();
+      await page.locator('.kpi', { hasText: '£360.00' }).waitFor();
+      assert.equal(await page.getByText('Not counted yet').count(), 0);
+      await page.getByText('64% of £1,000.00 budget').waitFor();
+      await page.getByText(/bookings? without a cost/).waitFor();
+      await shot(page, '08b-budget');
+      // Tapping a row opens the booking.
+      await page.locator('.cost-row', { hasText: 'MoMA' }).click();
+      await page.locator('#item-form').waitFor();
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+    });
+
     await check('trip settings: local-only sharing note, buffer change, calendar export', async () => {
       await page.getByRole('link', { name: 'Trip', exact: true }).click();
       await page.getByText('This trip is only on this device.').first().waitFor();
+      await page.getByRole('heading', { name: /Broadway show/ }).waitFor();
+      await page.getByRole('button', { name: 'View receipt.txt' }).click();
+      await page.locator('.doc-view a', { hasText: 'Open' }).waitFor();
       await page.getByLabel('Extra time added to drive estimates').selectOption('30');
       await page.getByRole('button', { name: 'Save', exact: true }).click();
       await page.getByText('Trip saved').waitFor();
@@ -231,8 +309,96 @@ async function main() {
       await page.reload();
       await page.getByText('Staying at Hotel Penn').waitFor();
       await page.locator('.leg').first().getByText(/About .* drive/).waitFor();
+      await page.locator('.ev', { hasText: 'Broadway show' }).getByText('📎 2 documents').waitFor();
       assert.equal(routeCalls, before, 'no new route requests');
       assert.match(await page.locator('.hint').textContent(), /30% buffer/);
+    });
+
+    await check('scan a pasted email with Claude: review, add, attach, get text from a photo', async () => {
+      const calls = [];
+      const blank = { title: '', provider: '', number: '', ref: '', seat: '', start: '', end: '', place: { name: '', search: '' }, from: { name: '', search: '' }, to: { name: '', search: '' }, cost: '', currency: '', paid: false, notes: '' };
+      await context.route('https://api.anthropic.com/**', async (route) => {
+        const req = route.request();
+        const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'POST, OPTIONS' };
+        if (req.method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: cors }); return; }
+        const body = req.postDataJSON();
+        calls.push({ body, headers: await req.allHeaders() });
+        const text = body.output_config?.format
+          ? JSON.stringify({ text: '', bookings: [
+            { ...blank, type: 'flight', provider: 'British Airways', number: 'BA 178', ref: 'XK9P2L', start: '2026-12-05T19:00', end: '2026-12-06T07:05',
+              from: { name: 'JFK Airport (JFK)', search: 'JFK Airport, New York' }, to: { name: 'Heathrow Airport (LHR)', search: 'Heathrow Airport, London' }, cost: '480', currency: 'GBP', paid: true },
+            { ...blank, type: 'activity', title: 'Top of the Rock', place: { name: 'Top of the Rock', search: 'Rockefeller Plaza, New York' }, ref: 'TR-55' },
+          ] })
+          : 'SEAT MAP\nRow G seats 12-13';
+        await route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/json', 'request-id': 'req_test' }, json: {
+          id: 'msg_test', type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text }],
+          stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 10, output_tokens: 10 },
+        } });
+      });
+
+      // Without a key the scan button explains how to set it up.
+      await page.goto(`${BASE}#/today`);
+      await page.getByRole('button', { name: 'Add to the plan' }).click();
+      await page.getByRole('button', { name: /Scan a booking/ }).click();
+      await page.getByRole('link', { name: 'Set up scanning' }).click();
+      await page.getByRole('heading', { name: 'Scanning bookings' }).waitFor();
+      await page.getByLabel('API key').fill('not-a-key');
+      await page.getByRole('button', { name: 'Turn on scanning' }).click();
+      await page.getByText(/doesn't look like an Anthropic API key/).waitFor();
+      await page.getByLabel('API key').fill('sk-ant-api03-testkey0123456789');
+      await page.getByRole('button', { name: 'Turn on scanning' }).click();
+      await page.getByText(/Scanning is on for this device/).waitFor();
+
+      await page.getByRole('button', { name: 'Add to the plan' }).click();
+      await page.getByRole('button', { name: /Scan a booking/ }).click();
+      await page.getByLabel('Paste a confirmation email').fill('Your British Airways booking XK9P2L. BA178 New York JFK to London Heathrow 5 Dec 19:00. Top of the Rock tickets TR-55.');
+      await page.getByRole('button', { name: 'Read booking' }).click();
+      await page.getByRole('heading', { name: 'Found 2 bookings' }).waitFor();
+      await shot(page, '10-scan-results');
+
+      const c = calls[0];
+      assert.equal(c.body.model, 'claude-opus-5-5');
+      assert.equal(c.body.output_config.format.type, 'json_schema');
+      assert.equal(c.body.fallbacks, 'default');
+      assert.match(c.headers['anthropic-beta'] || '', /server-side-fallback-2026-07-01/);
+      assert.equal(c.headers.authorization, 'Bearer sk-ant-api03-testkey0123456789');
+      assert.equal(c.headers['anthropic-dangerous-direct-browser-access'], 'true');
+      assert.match(JSON.stringify(c.body.messages), /BA178 New York JFK/);
+      assert.match(JSON.stringify(c.body.messages), /New York/, 'trip context is included');
+
+      // The activity has no date: review it, set one, save.
+      await page.locator('.scan-list li', { hasText: 'Top of the Rock' }).getByText(/Missing starts — tap Review/).waitFor();
+      await page.locator('.scan-list li', { hasText: 'Top of the Rock' }).getByRole('button', { name: 'Review' }).click();
+      assert.equal(await page.getByLabel('What').inputValue(), 'Top of the Rock');
+      assert.equal(await page.getByLabel('Booking reference').inputValue(), 'TR-55');
+      await page.locator('#docs').getByText('Confirmation email.txt').waitFor();
+      await page.getByLabel('Starts').fill('2026-12-03T17:00');
+      await page.locator('#save-item').click();
+      // Back to the results; add the flight.
+      await page.locator('.scan-list li.done', { hasText: 'Top of the Rock' }).waitFor();
+      await page.getByRole('button', { name: 'Add booking' }).click();
+      await page.getByText('1 booking added').waitFor();
+      await page.locator('#sheet').waitFor({ state: 'hidden' });
+
+      await page.goto(`${BASE}#/plan`);
+      const fl = page.locator('.ev', { hasText: 'Fly JFK Airport (JFK) → Heathrow Airport (LHR)' }).first();
+      await fl.getByText('📎 1 document').waitFor();
+      await fl.getByText(/£480\.00 · paid/).waitFor();
+      await fl.getByText('Ref XK9P2L').waitFor();
+      await fl.click();
+      await page.getByRole('button', { name: 'View Confirmation email.txt' }).click();
+      await page.getByText('Text in this document').click();
+      await page.locator('.doc-text pre', { hasText: 'BA178' }).waitFor();
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+
+      // Get text from a photo already attached to a booking.
+      await page.getByRole('button', { name: /Broadway show/ }).first().click();
+      await page.getByRole('button', { name: 'View seat-map.png' }).click();
+      await page.getByRole('button', { name: /Get the text from this document/ }).click();
+      await page.locator('.doc-text pre', { hasText: 'Row G seats 12-13' }).waitFor();
+      assert.ok(!calls.at(-1).body.output_config.format, 'transcription asks for plain text');
+      await shot(page, '11-doc-text');
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
     });
 
     await check('layout fits a phone screen (no sideways scroll)', async () => {
