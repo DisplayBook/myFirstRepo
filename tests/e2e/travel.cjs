@@ -54,6 +54,8 @@ async function main() {
 
   try {
     const context = await browser.newContext({ ...devices['iPhone 13'], acceptDownloads: true });
+    // These checks cover device-only trips, so run without shared sync.
+    await context.route('**/travel-planner/js/config.js', (route) => route.fulfill({ contentType: 'text/javascript', body: 'export const firebaseConfig = null;' }));
     await context.route('https://nominatim.openstreetmap.org/**', (route) => {
       const q = new URL(route.request().url()).searchParams.get('q').toLowerCase();
       const hit = Object.entries(PLACES).find(([k]) => q.includes(k));
