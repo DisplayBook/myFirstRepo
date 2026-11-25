@@ -1,0 +1,14 @@
+{
+  "name": "calf-care",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Installable, offline PWA for gentle daily calf and circulation exercises. No backend, no tracking.",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.mjs 8080",
+    "test": "node --test tests/unit/*.test.js",
+    "test:e2e": "node tests/e2e/run.cjs",
+    "icons": "node scripts/make-icons.cjs"
+  },
+  "license": "MIT"
+}
