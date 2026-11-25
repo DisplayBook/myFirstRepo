@@ -1,0 +1,28 @@
+rules_version = '2';
+
+// Trip Planner security rules. Paste into Firebase console → Firestore → Rules.
+//
+// Model: a trip id is a long random code (in the share link). Anyone using the
+// app who knows the code can read and edit that trip; nobody can list trips or
+// discover codes. Treat the share link like a password.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function validTripId(id) { return id.matches('^[0-9A-Za-z]{20,40}$'); }
+
+    match /trips/{tripId} {
+      allow get, delete: if signedIn() && validTripId(tripId);
+      allow create, update: if signedIn() && validTripId(tripId) && request.resource.data.size() < 30;
+      allow list: if false;
+
+      match /items/{itemId} {
+        allow read: if signedIn() && validTripId(tripId);
+        allow create, update: if signedIn() && validTripId(tripId)
+          && itemId.size() <= 40
+          && request.resource.data.size() < 40
+          && request.resource.data.type in ['flight', 'hotel', 'car', 'drive', 'activity', 'transport'];
+        allow delete: if signedIn() && validTripId(tripId);
+      }
+    }
+  }
+}
