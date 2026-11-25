@@ -87,3 +87,24 @@ tests/                Unit tests (node:test) and an end-to-end browser test
 ## Privacy
 
 No cookies, analytics, fonts or scripts from other sites. A Content-Security-Policy blocks external requests. Your log only leaves the device when you choose to download or share an export.
+
+---
+
+# Fluid Log (in `fluid-log/`)
+
+A second, separate app in this repo: an installable iPhone web app for tracking **fluid intake and urine output**.
+
+- **Today:** a progress ring against your daily target, how much is left, and whether you're on pace for your waking hours. Shows intake, output and balance (in − out), plus a breakdown by drink.
+- **Log intake:** one tap on a drink type (Water, Tea, Coffee, Milk, Juice, Soft drink, Soup, Other, or your own), pick a volume, adjust the time if needed, and add an optional note. It remembers the last volume you used for each drink.
+- **Log output:** urine volume and time.
+- **Edit or delete** any entry (with undo). Browse back to earlier days to see or add entries.
+- **History:** 7/14/30/90-day chart of intake vs output vs target, averages, days the target was met, and a day list you can tap into.
+- **Daily target:** set in Settings. A new target applies from today, so earlier days are still judged against the target they had.
+- **Export:** all entries as CSV, daily totals as CSV, and a JSON backup you can restore. On iPhone this opens the share sheet, so you can save to Files, AirDrop or email.
+- ml or US fl oz, light/dark mode, works offline. No accounts and no network requests; data is stored on the device.
+
+URL once GitHub Pages is on: `https://<user>.github.io/<repo>/fluid-log/`
+
+**iPhone:** open the link in Safari → Share → **Add to Home Screen**, then always open it from the home-screen icon. Safari can clear data for sites you haven't visited in a while, but home-screen web apps are exempt. Still, make a JSON backup now and then.
+
+Tests: `npm test` (includes `tests/unit/fluid-log.test.js`). Icons: `node scripts/make-fluid-icons.cjs`. After changing files, bump `VERSION` in `fluid-log/sw.js`.
