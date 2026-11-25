@@ -259,13 +259,23 @@ async function main() {
       await page.getByRole('button', { name: /Check in · Hotel Penn/ }).click();
       await page.getByLabel('Cost', { exact: true }).fill('600');
       await page.getByLabel('Currency').selectOption('GBP');
-      await page.getByLabel('Already paid').check();
+      await page.getByLabel('Payment').selectOption('full');
       await save();
       await page.getByRole('button', { name: /MoMA/ }).first().click();
       await page.getByLabel('Cost', { exact: true }).fill('50');
       await page.getByLabel('Currency').selectOption('USD');
+      // A deposit: the extra fields appear, the balance is shown, too-large deposits are refused.
+      assert.equal(await page.getByRole('textbox', { name: 'Deposit paid' }).isVisible(), false);
+      await page.getByLabel('Payment').selectOption('deposit');
+      await page.getByRole('textbox', { name: 'Deposit paid' }).fill('80');
+      await page.locator('#save-item').click();
+      await page.getByText('The deposit is more than the cost').waitFor();
+      await page.getByRole('textbox', { name: 'Deposit paid' }).fill('20');
+      await page.getByText('Balance to pay: $30.00').waitFor();
+      await page.getByLabel('Balance due by').fill('2026-11-30');
       await save();
       await page.getByText('£600.00 · paid').first().waitFor();
+      await page.getByText('$50.00 · $20.00 deposit paid').first().waitFor();
       await page.getByRole('link', { name: 'Budget' }).click();
       await page.getByRole('heading', { name: 'Budget', level: 1 }).waitFor();
       // The trip's home currency was set when it was created (USD on this test phone).
@@ -282,9 +292,16 @@ async function main() {
       assert.equal(await page.getByText('Not counted yet').count(), 0);
       await page.getByText('64% of £1,000.00 budget').waitFor();
       await page.getByText(/bookings? without a cost/).waitFor();
+      // Paid = hotel £600 + $20 deposit × 0.8 = £616; still to pay = $30 × 0.8 = £24.
+      await page.locator('.small-kpis', { hasText: '£616.00' }).waitFor();
+      await page.locator('.small-kpis', { hasText: '£24.00' }).waitFor();
+      const upcoming = page.locator('.card', { has: page.getByRole('heading', { name: 'Upcoming payments' }) });
+      await upcoming.getByText(/Overdue · Balance due Mon 30 Nov · \$20\.00 deposit paid/).waitFor();
+      await upcoming.getByText('$30.00').waitFor();
+      await page.locator('.cost-row', { hasText: 'MoMA' }).last().getByText('Deposit $20.00').waitFor();
       await shot(page, '08b-budget');
       // Tapping a row opens the booking.
-      await page.locator('.cost-row', { hasText: 'MoMA' }).click();
+      await page.locator('.cost-row', { hasText: 'MoMA' }).first().click();
       await page.locator('#item-form').waitFor();
       await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
     });

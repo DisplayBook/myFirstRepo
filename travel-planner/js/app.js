@@ -9,7 +9,7 @@ import * as store from './store.js';
 import { searchPlaces, driveRoute, cachedRoute, currentPosition } from './geo.js';
 import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
-import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount } from './budget.js';
+import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount, payment } from './budget.js';
 import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError } from './ai.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -224,7 +224,9 @@ function eventMeta(ev) {
   if (it.ref && ['depart', 'checkin', 'pickup', 'activity'].includes(ev.kind)) bits.push(`Ref ${it.ref}`);
   if (it.seat && ev.kind === 'depart') bits.push(it.seat);
   if (hasCost(it) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind)) {
-    bits.push(`${fmtMoney(Number(it.cost), it.currency || homeCurrency(S.meta))}${it.paid ? ' · paid' : ''}`);
+    const cur = it.currency || homeCurrency(S.meta);
+    const pay = payment(it);
+    bits.push(`${fmtMoney(Number(it.cost), cur)}${pay.status === 'full' ? ' · paid' : pay.status === 'deposit' ? ` · ${fmtMoney(pay.paid, cur)} deposit paid` : ''}`);
   }
   return bits;
 }
@@ -484,7 +486,7 @@ async function renderMap(arg) {
 
 function renderBudget() {
   if (loadingOrMissing()) return;
-  const b = budgetSummary(S.items, S.meta);
+  const b = budgetSummary(S.items, S.meta, localDate());
   const home = b.home;
   const money = (n) => fmtMoney(n, home);
   const pct = b.budget ? Math.min(100, Math.round((b.total / b.budget) * 100)) : null;
@@ -527,6 +529,17 @@ function renderBudget() {
       ${b.budget !== null && days.length ? `<p class="muted small">Average ${esc(money(b.total / days.length))} a day · budget allows ${esc(money(b.budget / days.length))} a day</p>` : ''}
     </section>` : ''}
 
+    ${b.upcoming.length ? `<section class="card">
+      <h2>Upcoming payments</h2>
+      <ul class="costs">${b.upcoming.map((r) => `<li>
+        <button type="button" class="cost-row" data-edit="${esc(r.item.id)}">
+          <span aria-hidden="true">${TYPES[r.item.type].icon}</span>
+          <span class="cost-name"><strong>${esc(r.title)}</strong>
+            <span class="small ${r.overdue ? 'error' : 'muted'}">${r.overdue ? 'Overdue · ' : ''}${r.balanceDue ? `Balance due ${esc(fmtDate(r.balanceDue))}` : r.by ? `Not paid · booking ${esc(fmtDate(r.by))}` : 'Not paid'}${r.status === 'deposit' ? ` · ${esc(fmtMoney(r.paidLocal, r.currency))} deposit paid` : ''}</span></span>
+          <span class="cost-amt">${esc(fmtMoney(r.dueLocal, r.currency))}${r.currency !== home && r.dueValue !== null ? `<span class="muted small">≈ ${esc(money(r.dueValue))}</span>` : ''}</span>
+        </button></li>`).join('')}</ul>
+    </section>` : ''}
+
     <section class="card">
       <h2>Bookings</h2>
       ${b.rows.length ? `<ul class="costs">${b.rows.map((r) => `<li>
@@ -534,7 +547,7 @@ function renderBudget() {
           <span aria-hidden="true">${TYPES[r.item.type].icon}</span>
           <span class="cost-name"><strong>${esc(r.title)}</strong><span class="muted small">${esc(fmtDate(datePart(r.item.start)))}${r.currency !== home ? ` · ${esc(fmtMoney(r.cost, r.currency))}` : ''}</span></span>
           <span class="cost-amt">${r.value === null ? `<span class="muted">${esc(fmtMoney(r.cost, r.currency))}</span>` : esc(money(r.value))}
-            <span class="badge ${r.paid ? 'paidb' : ''}">${r.paid ? 'Paid' : 'To pay'}</span></span>
+            <span class="badge ${r.status === 'full' ? 'paidb' : r.status === 'deposit' ? 'depb' : ''}">${r.status === 'full' ? 'Paid' : r.status === 'deposit' ? `Deposit ${esc(fmtMoney(r.paidLocal, r.currency))}` : 'To pay'}</span></span>
         </button></li>`).join('')}</ul>` : '<p class="muted">No costs yet. Open a booking and fill in its cost.</p>'}
       ${b.uncosted.length ? `<details class="uncosted"><summary>${b.uncosted.length} booking${b.uncosted.length === 1 ? '' : 's'} without a cost</summary>
         <ul class="costs">${b.uncosted.map((it) => `<li><button type="button" class="cost-row" data-edit="${esc(it.id)}">
@@ -948,7 +961,7 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
   const fieldHtml = def.fields.map((f) => {
     const v = draft[f.key] ?? '';
     // View only: show just what's filled in.
-    if (ro && (f.kind === 'money' ? !hasCost(draft) : f.kind === 'place' ? !v?.name : !v)) return '';
+    if (ro && (f.kind === 'money' || f.kind === 'payment' ? !hasCost(draft) : f.kind === 'place' ? !v?.name : !v)) return '';
     const req = f.required && !ro ? ' required' : '';
     const lbl = `<span>${esc(f.label)}${f.required && !ro ? ' <span class="req" aria-hidden="true">*</span>' : ''}</span>`;
     switch (f.kind) {
@@ -963,6 +976,20 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
           <label><span>Currency</span><select name="currency">${opts.map((c) => `<option ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label></div>`;
       }
       case 'checkbox': return `<label class="check"><input type="checkbox" name="${f.key}" ${v ? 'checked' : ''}> <span>${esc(f.label)}</span></label>`;
+      case 'payment': {
+        const st = payment(draft).status;
+        return `<div class="payment">
+          <label><span>Payment</span><select name="payStatus">
+            <option value="none" ${st === 'none' ? 'selected' : ''}>Not paid yet</option>
+            <option value="deposit" ${st === 'deposit' ? 'selected' : ''}>Deposit paid</option>
+            <option value="full" ${st === 'full' ? 'selected' : ''}>Paid in full</option></select></label>
+          <div class="two deposit-fields" ${st === 'deposit' ? '' : 'hidden'}>
+            <label><span>Deposit paid</span><input name="deposit" inputmode="decimal" autocomplete="off" placeholder="0.00" value="${esc(draft.deposit ?? '')}"></label>
+            <label><span>Balance due by</span><input type="date" name="balanceDue" value="${esc(draft.balanceDue || '')}"></label>
+          </div>
+          <p class="muted small balance-note" aria-live="polite"></p>
+        </div>`;
+      }
       default: return `<label>${lbl}<input name="${f.key}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}"${req} autocomplete="off"></label>`;
     }
   }).join('');
@@ -988,10 +1015,39 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
   </form>`, `${ro ? 'View' : existing ? 'Edit' : 'Add'} ${def.label}`);
 
   const form = $('#item-form');
+  // Payment: show the deposit fields only for "Deposit paid", with the balance left.
+  const payBox = $('.payment', form);
+  if (payBox) {
+    const update = () => {
+      const st = form.elements.payStatus.value;
+      $('.deposit-fields', payBox).hidden = st !== 'deposit';
+      const cost = parseAmount(form.elements.cost?.value);
+      const dep = parseAmount(form.elements.deposit.value);
+      const cur = form.elements.currency?.value || homeCurrency(S.meta);
+      $('.balance-note', payBox).textContent = st === 'deposit' && cost !== null && dep !== null && dep <= cost
+        ? `Balance to pay: ${fmtMoney(cost - dep, cur)}` : '';
+    };
+    form.addEventListener('input', (e) => { if (/^(payStatus|deposit|cost|currency)$/.test(e.target.name)) update(); });
+    form.addEventListener('change', (e) => { if (/^(payStatus|currency)$/.test(e.target.name)) update(); });
+    update();
+  }
   const readInputs = () => {
     for (const f of def.fields) {
       if (f.kind === 'place') continue;
       if (f.kind === 'checkbox') { draft[f.key] = !!form.elements[f.key]?.checked; continue; }
+      if (f.kind === 'payment') {
+        const st = form.elements.payStatus.value;
+        draft.paid = st === 'full';
+        if (st === 'deposit') {
+          const dep = parseAmount(form.elements.deposit.value);
+          draft.deposit = dep === null ? '' : dep;
+          draft.balanceDue = form.elements.balanceDue.value;
+        } else {
+          delete draft.deposit;
+          delete draft.balanceDue;
+        }
+        continue;
+      }
       if (f.kind === 'money') {
         const amt = parseAmount(form.elements.cost.value);
         draft.cost = amt === null ? '' : amt;
@@ -1067,7 +1123,13 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
     const errs = validateItem(draft);
     const errEl = $('#form-err');
     if (form.elements.cost && form.elements.cost.value.trim() && parseAmount(form.elements.cost.value) === null) errs.push('Cost must be a number');
-    if (!hasCost(draft)) { delete draft.currency; draft.paid = false; }
+    if (form.elements.payStatus?.value === 'deposit') {
+      const dep = parseAmount(form.elements.deposit.value);
+      if (!hasCost(draft)) errs.push('Enter the total cost before the deposit');
+      else if (dep === null || dep <= 0) errs.push('Enter the deposit amount');
+      else if (dep > Number(draft.cost)) errs.push('The deposit is more than the cost');
+    }
+    if (!hasCost(draft)) { delete draft.currency; delete draft.deposit; delete draft.balanceDue; draft.paid = false; }
     if (errs.length) { errEl.textContent = errs.join('. '); errEl.hidden = false; errEl.scrollIntoView({ block: 'nearest' }); return; }
     if (type === 'drive' && !draft.route && hasCoords(draft.from) && hasCoords(draft.to)) await updateRoute().catch(() => {});
     if (type === 'car' && draft.to && draft.from && draft.to.name === draft.from.name) delete draft.to;

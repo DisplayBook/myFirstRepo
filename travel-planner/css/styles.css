@@ -37,6 +37,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
@@ -238,6 +239,9 @@ textarea { resize: vertical; }
 .cost-amt { display: grid; justify-items: end; gap: 2px; font-weight: 650; font-variant-numeric: tabular-nums; }
 .cost-amt.link { color: var(--accent); font-weight: 600; }
 .badge.paidb { color: var(--ok); }
+.badge.depb { color: var(--warn); background: var(--warn-bg); }
+.payment { display: grid; gap: 10px; }
+.payment .balance-note:empty { display: none; }
 .uncosted { margin-top: 10px; }
 .uncosted summary { cursor: pointer; color: var(--accent); font-weight: 600; min-height: 40px; display: flex; align-items: center; }
 .rates { border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px 4px; display: grid; gap: 8px; margin: 0; }

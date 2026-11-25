@@ -61,8 +61,23 @@ export function spreadCost(it, amount) {
   return days.map((date) => ({ date, amount: share }));
 }
 
+/**
+ * Payment state of a booking, in the booking's own currency.
+ * status: 'full' (paid in full), 'deposit' (part paid) or 'none'.
+ */
+export function payment(it) {
+  const cost = hasCost(it) ? Number(it.cost) : 0;
+  if (it.paid) return { status: 'full', paid: cost, due: 0, balanceDue: '' };
+  const dep = Number(it.deposit);
+  if (isFinite(dep) && dep > 0) {
+    const paid = Math.min(dep, cost);
+    return { status: 'deposit', paid, due: Math.max(0, cost - paid), balanceDue: it.balanceDue || '' };
+  }
+  return { status: 'none', paid: 0, due: cost, balanceDue: it.balanceDue || '' };
+}
+
 /** Everything the Budget screen shows. Amounts are in the home currency. */
-export function budgetSummary(items, meta = {}) {
+export function budgetSummary(items, meta = {}, today = '') {
   const home = homeCurrency(meta);
   const rates = meta.rates || {};
   const byType = Object.fromEntries(Object.keys(TYPES).map((k) => [k, 0]));
@@ -75,19 +90,33 @@ export function budgetSummary(items, meta = {}) {
     if (!hasCost(it)) { uncosted.push(it); continue; }
     const currency = it.currency || home;
     const value = toHome(it.cost, currency, home, rates);
-    rows.push({ item: it, title: itemTitle(it), cost: Number(it.cost), currency, value, paid: !!it.paid });
+    const pay = payment(it);
+    const ratio = Number(it.cost) > 0 ? pay.paid / Number(it.cost) : (pay.status === 'full' ? 1 : 0);
+    const paidValue = value === null ? null : value * ratio;
+    rows.push({
+      item: it, title: itemTitle(it), cost: Number(it.cost), currency, value,
+      status: pay.status, paid: pay.status === 'full', paidLocal: pay.paid, dueLocal: pay.due,
+      paidValue, dueValue: value === null ? null : value - paidValue, balanceDue: pay.balanceDue,
+    });
     if (value === null) { missingRates.add(currency); continue; }
     total += value;
-    if (it.paid) paid += value;
+    paid += paidValue;
     byType[it.type] = (byType[it.type] || 0) + value;
     for (const s of spreadCost(it, value)) byDay[s.date] = (byDay[s.date] || 0) + s.amount;
   }
   rows.sort((a, b) => String(a.item.start || '').localeCompare(String(b.item.start || '')));
+  // What's still to pay, soonest deadline first (balance-due date, else the booking's start).
+  const upcoming = rows.filter((r) => r.dueLocal > 0.005)
+    .map((r) => {
+      const by = r.balanceDue || datePart(r.item.start) || '';
+      return { ...r, by, overdue: !!(today && by && by < today) };
+    })
+    .sort((a, b) => (a.by || '~').localeCompare(b.by || '~'));
   const budget = Number(meta.budget) > 0 ? Number(meta.budget) : null;
   return {
     home, total, paid, unpaid: total - paid, budget,
     remaining: budget === null ? null : budget - total,
-    byType, byDay, rows, uncosted, missingRates: [...missingRates].sort(),
+    byType, byDay, rows, upcoming, uncosted, missingRates: [...missingRates].sort(),
   };
 }
 
