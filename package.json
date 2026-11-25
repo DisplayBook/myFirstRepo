@@ -8,6 +8,7 @@
     "start": "node scripts/serve.mjs 8080",
     "test": "node --test tests/unit/*.test.js",
     "test:e2e": "node tests/e2e/run.cjs",
+    "test:e2e:travel": "node tests/e2e/travel.cjs",
     "icons": "node scripts/make-icons.cjs"
   },
   "license": "MIT"

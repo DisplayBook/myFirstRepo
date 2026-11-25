@@ -108,3 +108,53 @@ URL once GitHub Pages is on: `https://<user>.github.io/<repo>/fluid-log/`
 **iPhone:** open the link in Safari → Share → **Add to Home Screen**, then always open it from the home-screen icon. Safari can clear data for sites you haven't visited in a while, but home-screen web apps are exempt. Still, make a JSON backup now and then.
 
 Tests: `npm test` (includes `tests/unit/fluid-log.test.js`). Icons: `node scripts/make-fluid-icons.cjs`. After changing files, bump `VERSION` in `fluid-log/sw.js`.
+
+---
+
+# Trip Planner (in `travel-planner/`)
+
+A third, separate app: an installable web app (works in any browser and on iPhone) for **planning a trip together**: flights, hotels, car hire, drives, trains/ferries and daily activities. It shows what's on today, maps the whole trip, and works out drive times.
+
+- **Today:** the day's timeline, a "Next up" card with a countdown, where you're staying, and car hire in progress. Swipe through the trip with the day strip or the ‹ › arrows.
+- **Drive times between plans:** when two plans on the same day are in different places (hotel → museum, airport → hotel, back to the hotel at night), it shows the estimated drive time and distance, and warns you when there isn't enough time (**tight** or **you'd be late**). There's a **Directions** link that opens Apple Maps on iPhone and Google Maps elsewhere.
+- **Drive planner:** add a drive with *From*, *To* and *Leave at*, and it calculates the duration, distance and arrival time. Add a traffic buffer (+10% by default, set per trip) and time for stops. There's also a stand-alone **Drive time calculator** (Map tab or the + button).
+- **Plan:** the whole itinerary, day by day.
+- **Map:** every place on an OpenStreetMap map. Flights show as arcs, drives follow the actual roads, and you can filter by day. Tap a pin for details and directions.
+- **Place search:** type a place, address or airport and pick from the results. Places you've already used show up as one-tap chips, and you can use your current location.
+- **Sharing:** with sync turned on (below), everyone with the trip link sees the same plan and can edit it. Changes appear within seconds, and it works offline (changes sync when you're back online). It shows who last edited each item.
+- **Export:** add everything to your calendar (.ics), or download/import a JSON backup.
+
+URL once GitHub Pages is on: `https://<user>.github.io/<repo>/travel-planner/`. On iPhone: Safari → Share → **Add to Home Screen**.
+
+**Services used** (free, no API keys): map tiles from OpenStreetMap, place search from [Nominatim](https://nominatim.org), driving routes from the [OSRM](https://project-osrm.org) public server. Drive times don't include live traffic, which is why there's a buffer. These public servers are fine for personal use but have fair-use limits; the app spaces out requests and caches routes on the device.
+
+## Turn on sharing (one-time, about 5 minutes)
+
+Without this, trips are saved only on the device you made them on. To share live with other people, connect the app to a free Firebase database:
+
+1. Go to <https://console.firebase.google.com>, click **Create a project** (Google Analytics is not needed).
+2. **Build → Firestore Database → Create database.** Pick a location near you and start in **production mode**.
+3. **Firestore → Rules:** replace the rules with the contents of [`travel-planner/firestore.rules`](travel-planner/firestore.rules), then click **Publish**.
+4. **Build → Authentication → Get started → Sign-in method → Anonymous → Enable.** (No one has to make an account; this just lets the rules check that the request comes from the app.)
+5. **Authentication → Settings → Authorized domains:** add `<user>.github.io`.
+6. **Project settings (⚙️) → Your apps → Web (`</>`)**, register an app (no hosting), and copy the `firebaseConfig` values into [`travel-planner/js/config.js`](travel-planner/js/config.js):
+   ```js
+   export const firebaseConfig = {
+     apiKey: 'AIza…',
+     authDomain: 'your-project.firebaseapp.com',
+     projectId: 'your-project',
+     appId: '1:…:web:…',
+   };
+   ```
+   This config is not a secret, so committing it is fine: access is controlled by the rules.
+7. Commit, push, and bump `VERSION` in `travel-planner/sw.js`.
+
+Now new trips are shared. In the app, go to **Trip → Share link** and send the link (Messages, WhatsApp, email). When someone opens it, the trip is added to their app. Trips you made before turning on sync have a **Move to shared sync** button.
+
+**Who can see a trip:** anyone who has its link. The link contains a long random code that can't be guessed, and the rules stop anyone from listing trips. Treat it like a password, and only send it to people you want editing the plan. The free Firebase tier (50k reads / 20k writes per day) is far more than a family trip needs.
+
+## Notes
+
+- Times are stored exactly as you type them (the local time on your ticket), with no time-zone conversion, so a 09:30 departure from London and an 11:20 arrival in New York both show as printed.
+- Tests: `npm test` (includes `tests/unit/travel-planner.test.js`) and `npm run test:e2e:travel` (phone-sized browser test with the map and route services mocked).
+- Icons: `node scripts/make-travel-icons.cjs`. After changing files, bump `VERSION` in `travel-planner/sw.js`.
