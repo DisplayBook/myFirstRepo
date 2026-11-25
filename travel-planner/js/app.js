@@ -9,6 +9,7 @@ import * as store from './store.js';
 import { searchPlaces, driveRoute, cachedRoute, currentPosition } from './geo.js';
 import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
+import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount } from './budget.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -99,7 +100,7 @@ async function write(fn) {
 async function createTrip({ name, start, end }) {
   const id = uid(22);
   const kind = store.cloudConfigured() ? 'cloud' : 'local';
-  const meta = cleanItem({ name: name || 'My trip', start, end, bufferPct: 10, createdAt: new Date().toISOString() });
+  const meta = cleanItem({ name: name || 'My trip', start, end, bufferPct: 10, currency: homeCurrency({}), createdAt: new Date().toISOString() });
   store.rememberTrip({ id, name: meta.name, kind });
   const p = store.backendFor(kind).create(id, meta);
   if (kind === 'local') await p; else p.catch((e) => toast(`Not saved: ${e.message}`));
@@ -166,6 +167,7 @@ function render({ fromData = false } = {}) {
     case 'plan': renderPlan(); break;
     case 'map': renderMap(r.arg); break;
     case 'trip': renderTripSettings(); break;
+    case 'budget': renderBudget(); break;
     default: renderToday(r.arg);
   }
   renderStatus();
@@ -202,6 +204,9 @@ function eventMeta(ev) {
   }
   if (it.ref && ['depart', 'checkin', 'pickup', 'activity'].includes(ev.kind)) bits.push(`Ref ${it.ref}`);
   if (it.seat && ev.kind === 'depart') bits.push(it.seat);
+  if (hasCost(it) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind)) {
+    bits.push(`${fmtMoney(Number(it.cost), it.currency || homeCurrency(S.meta))}${it.paid ? ' · paid' : ''}`);
+  }
   return bits;
 }
 
@@ -454,6 +459,102 @@ async function renderMap(arg) {
       if (c) draw(c); else driveRoute(leg.from, leg.to).then(draw).catch(() => {});
     }
   }
+}
+
+// ---------- Budget ----------
+
+function renderBudget() {
+  if (loadingOrMissing()) return;
+  const b = budgetSummary(S.items, S.meta);
+  const home = b.home;
+  const money = (n) => fmtMoney(n, home);
+  const pct = b.budget ? Math.min(100, Math.round((b.total / b.budget) * 100)) : null;
+  const over = b.budget !== null && b.total > b.budget;
+  const maxType = Math.max(1, ...Object.values(b.byType));
+  const span = tripSpan(S.meta, S.items);
+  const days = dateRange(span.start, span.end);
+  const maxDay = Math.max(1, ...Object.values(b.byDay));
+  const otherCurrencies = [...new Set([...b.rows.map((r) => r.currency), ...Object.keys(S.meta.rates || {})])].filter((c) => c !== home).sort();
+
+  main.innerHTML = `<h1>Budget</h1>
+    <section class="card budget-top">
+      <div class="kpis">
+        <div><span class="kpi-label">Planned spend</span><strong class="kpi">${esc(money(b.total))}</strong></div>
+        ${b.budget !== null ? `<div><span class="kpi-label">${over ? 'Over budget' : 'Left in budget'}</span><strong class="kpi ${over ? 'bad' : 'ok'}">${esc(money(Math.abs(b.remaining)))}</strong></div>` : ''}
+      </div>
+      ${b.budget !== null ? `<div class="meter ${over ? 'over' : ''}" role="img" aria-label="${pct}% of the ${esc(money(b.budget))} budget planned"><span style="width:${pct}%"></span></div>
+        <p class="muted small">${pct}% of ${esc(money(b.budget))} budget</p>` : '<p class="muted small">Set a total budget below to track what\'s left.</p>'}
+      <div class="kpis small-kpis">
+        <div><span class="kpi-label">Paid</span><strong>${esc(money(b.paid))}</strong></div>
+        <div><span class="kpi-label">Still to pay</span><strong>${esc(money(b.unpaid))}</strong></div>
+      </div>
+      ${b.missingRates.length ? `<p class="warn-box">Not counted yet: costs in ${b.missingRates.map(esc).join(', ')}. Add the exchange rate below.</p>` : ''}
+    </section>
+
+    ${b.total > 0 ? `<section class="card">
+      <h2>By category</h2>
+      <ul class="bars">${Object.entries(b.byType).filter(([, v]) => v > 0).sort((x, y) => y[1] - x[1]).map(([k, v]) => `
+        <li><span class="bar-label">${TYPES[k].icon} ${esc(TYPES[k].plural.replace(/^./, (c) => c.toUpperCase()))}</span>
+          <span class="bar" style="--c:${TYPES[k].color}"><span style="width:${Math.max(2, (v / maxType) * 100)}%"></span></span>
+          <span class="bar-value">${esc(money(v))}</span></li>`).join('')}</ul>
+    </section>
+    <section class="card">
+      <h2>By day</h2>
+      <p class="muted small">Hotel and car hire costs are spread across the nights and days they cover.</p>
+      <ul class="bars days">${days.map((d, i) => `
+        <li><a class="bar-label" href="#/today/${d}">Day ${i + 1} · ${esc(fmtDate(d))}</a>
+          <span class="bar" style="--c:var(--accent)"><span style="width:${b.byDay[d] ? Math.max(2, (b.byDay[d] / maxDay) * 100) : 0}%"></span></span>
+          <span class="bar-value">${b.byDay[d] ? esc(money(b.byDay[d])) : '—'}</span></li>`).join('')}</ul>
+      ${b.budget !== null && days.length ? `<p class="muted small">Average ${esc(money(b.total / days.length))} a day · budget allows ${esc(money(b.budget / days.length))} a day</p>` : ''}
+    </section>` : ''}
+
+    <section class="card">
+      <h2>Bookings</h2>
+      ${b.rows.length ? `<ul class="costs">${b.rows.map((r) => `<li>
+        <button type="button" class="cost-row" data-edit="${esc(r.item.id)}">
+          <span aria-hidden="true">${TYPES[r.item.type].icon}</span>
+          <span class="cost-name"><strong>${esc(r.title)}</strong><span class="muted small">${esc(fmtDate(datePart(r.item.start)))}${r.currency !== home ? ` · ${esc(fmtMoney(r.cost, r.currency))}` : ''}</span></span>
+          <span class="cost-amt">${r.value === null ? `<span class="muted">${esc(fmtMoney(r.cost, r.currency))}</span>` : esc(money(r.value))}
+            <span class="badge ${r.paid ? 'paidb' : ''}">${r.paid ? 'Paid' : 'To pay'}</span></span>
+        </button></li>`).join('')}</ul>` : '<p class="muted">No costs yet. Open a booking and fill in its cost.</p>'}
+      ${b.uncosted.length ? `<details class="uncosted"><summary>${b.uncosted.length} booking${b.uncosted.length === 1 ? '' : 's'} without a cost</summary>
+        <ul class="costs">${b.uncosted.map((it) => `<li><button type="button" class="cost-row" data-edit="${esc(it.id)}">
+          <span aria-hidden="true">${TYPES[it.type].icon}</span><span class="cost-name"><strong>${esc(itemTitle(it))}</strong><span class="muted small">${esc(fmtDate(datePart(it.start)))}</span></span>
+          <span class="cost-amt link">Add cost</span></button></li>`).join('')}</ul></details>` : ''}
+    </section>
+
+    <section class="card">
+      <h2>Budget settings</h2>
+      <form id="budget-form" class="form">
+        <div class="two">
+          <label>Home currency<select name="currency">${[...new Set([home, ...CURRENCIES])].map((c) => `<option ${c === home ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+          <label>Total budget<input name="budget" inputmode="decimal" placeholder="optional" value="${esc(b.budget ?? '')}"></label>
+        </div>
+        ${otherCurrencies.length ? `<fieldset class="rates"><legend>Exchange rates</legend>
+          ${otherCurrencies.map((c) => `<label class="rate">1 ${esc(c)} =<input name="rate-${esc(c)}" inputmode="decimal" value="${esc(S.meta.rates?.[c] ?? '')}" placeholder="?" aria-label="${esc(home)} for 1 ${esc(c)}"> ${esc(home)}</label>`).join('')}
+          <p class="muted small">Look up today's rate in your bank app or a search engine.</p></fieldset>` : ''}
+        <button class="btn">Save</button>
+        <p class="muted small">Shared with everyone on the trip.</p>
+      </form>
+    </section>`;
+
+  $('#budget-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const budget = parseAmount(fd.get('budget'));
+    if (String(fd.get('budget')).trim() && budget === null) { toast('Budget must be a number'); return; }
+    const rates = {};
+    for (const c of otherCurrencies) {
+      const r = parseAmount(fd.get(`rate-${c}`));
+      if (r !== null && r > 0) rates[c] = r;
+    }
+    const currency = fd.get('currency');
+    if (currency !== home && Object.keys(rates).length) {
+      if (!confirm(`Changing the home currency to ${currency} — remember to update the exchange rates to be in ${currency}.`)) return;
+    }
+    await write((bk, id) => bk.saveMeta(id, { currency, budget: budget ?? 0, rates }));
+    toast('Budget saved');
+  };
 }
 
 // ---------- Trip settings ----------
@@ -752,6 +853,13 @@ function openItemForm(type, existing, prefill = {}) {
       case 'datetime': return `<label>${lbl}<input type="datetime-local" name="${f.key}" value="${esc(v)}"${req}></label>`;
       case 'number': return `<label>${lbl}<input type="number" inputmode="numeric" min="0" step="5" name="${f.key}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}"></label>`;
       case 'textarea': return `<label>${lbl}<textarea name="${f.key}" rows="3">${esc(v)}</textarea></label>`;
+      case 'money': {
+        const cur = draft.currency || homeCurrency(S.meta);
+        const opts = [...new Set([homeCurrency(S.meta), cur, ...Object.keys(S.meta.rates || {}), ...CURRENCIES])];
+        return `<div class="money"><label>${lbl}<input name="cost" inputmode="decimal" autocomplete="off" placeholder="0.00" value="${esc(v)}"></label>
+          <label><span>Currency</span><select name="currency">${opts.map((c) => `<option ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label></div>`;
+      }
+      case 'checkbox': return `<label class="check"><input type="checkbox" name="${f.key}" ${v ? 'checked' : ''}> <span>${esc(f.label)}</span></label>`;
       default: return `<label>${lbl}<input name="${f.key}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}"${req} autocomplete="off"></label>`;
     }
   }).join('');
@@ -777,6 +885,13 @@ function openItemForm(type, existing, prefill = {}) {
   const readInputs = () => {
     for (const f of def.fields) {
       if (f.kind === 'place') continue;
+      if (f.kind === 'checkbox') { draft[f.key] = !!form.elements[f.key]?.checked; continue; }
+      if (f.kind === 'money') {
+        const amt = parseAmount(form.elements.cost.value);
+        draft.cost = amt === null ? '' : amt;
+        draft.currency = form.elements.currency.value;
+        continue;
+      }
       const v = form.elements[f.key]?.value ?? '';
       draft[f.key] = f.kind === 'number' ? (v === '' ? '' : Number(v)) : v;
     }
@@ -844,6 +959,8 @@ function openItemForm(type, existing, prefill = {}) {
     readInputs();
     const errs = validateItem(draft);
     const errEl = $('#form-err');
+    if (form.elements.cost && form.elements.cost.value.trim() && parseAmount(form.elements.cost.value) === null) errs.push('Cost must be a number');
+    if (!hasCost(draft)) { delete draft.currency; draft.paid = false; }
     if (errs.length) { errEl.textContent = errs.join('. '); errEl.hidden = false; errEl.scrollIntoView({ block: 'nearest' }); return; }
     if (type === 'drive' && !draft.route && hasCoords(draft.from) && hasCoords(draft.to)) await updateRoute().catch(() => {});
     if (type === 'car' && draft.to && draft.from && draft.to.name === draft.from.name) delete draft.to;

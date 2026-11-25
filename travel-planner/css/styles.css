@@ -207,6 +207,44 @@ textarea { resize: vertical; }
 .iconbtn.small { width: 40px; height: 40px; font-size: 1rem; }
 .filebtn.small { justify-self: start; }
 
+/* ---------- costs & budget ---------- */
+.money { display: grid; grid-template-columns: 1fr 120px; gap: 10px; }
+.money label span, .form label > span { color: var(--muted); }
+.check { display: flex !important; align-items: center; gap: 10px; min-height: 44px; color: var(--text) !important; font-weight: 500 !important; }
+.check input { width: 22px; height: 22px; min-height: 0; accent-color: var(--accent); }
+.kpis { display: flex; flex-wrap: wrap; gap: 8px 28px; }
+.kpis > div { display: grid; }
+.kpi-label { font-size: .8rem; color: var(--muted); font-weight: 600; }
+.kpi { font-size: 1.7rem; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.kpi.ok { color: var(--ok); }
+.kpi.bad { color: var(--bad); }
+.small-kpis { margin-top: 10px; }
+.small-kpis strong { font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+.meter { height: 12px; border-radius: 6px; background: var(--chip); overflow: hidden; margin: 12px 0 4px; }
+.meter span { display: block; height: 100%; background: var(--ok); border-radius: 6px; }
+.meter.over span { background: var(--bad); }
+.warn-box { background: var(--warn-bg); color: var(--warn); border-radius: 10px; padding: 8px 12px; font-size: .9rem; margin-top: 10px; }
+.bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.bars li { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) auto; align-items: center; gap: 10px; font-size: .9rem; }
+.bars .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-decoration: none; }
+.bar { height: 10px; border-radius: 5px; background: var(--chip); overflow: hidden; }
+.bar span { display: block; height: 100%; background: var(--c); border-radius: 5px; }
+.bar-value { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; min-width: 64px; }
+.costs { list-style: none; margin: 0; padding: 0; }
+.costs li + li { border-top: 1px solid var(--line); }
+.cost-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 56px; padding: 8px 2px; background: none; border: 0; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.cost-name { display: grid; flex: 1; min-width: 0; }
+.cost-name strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cost-amt { display: grid; justify-items: end; gap: 2px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.cost-amt.link { color: var(--accent); font-weight: 600; }
+.badge.paidb { color: var(--ok); }
+.uncosted { margin-top: 10px; }
+.uncosted summary { cursor: pointer; color: var(--accent); font-weight: 600; min-height: 40px; display: flex; align-items: center; }
+.rates { border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px 4px; display: grid; gap: 8px; margin: 0; }
+.rates legend { font-size: .9rem; font-weight: 600; color: var(--muted); padding: 0 4px; }
+.rate { display: flex !important; align-items: center; gap: 8px; color: var(--text) !important; font-weight: 500 !important; }
+.rate input { width: 110px; }
+
 /* ---------- plan ---------- */
 .plan-day { margin: 18px 0; }
 .plan-head { display: flex; justify-content: space-between; align-items: center; color: var(--text); text-decoration: none; font-weight: 700; padding: 6px 2px; min-height: 40px; border-bottom: 1px solid var(--line); }
@@ -248,7 +286,7 @@ body[data-view="map"] .fab { bottom: calc(var(--tabbar-h) + env(safe-area-inset-
 
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 25;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   padding-bottom: env(safe-area-inset-bottom);
   background: color-mix(in srgb, var(--card) 92%, transparent);
   backdrop-filter: saturate(1.4) blur(12px); -webkit-backdrop-filter: saturate(1.4) blur(12px);

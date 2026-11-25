@@ -221,3 +221,51 @@ test('documents: names, sizes and icons', () => {
   assert.equal(fileIcon('image/jpeg', 'a.jpg'), '🖼️');
   assert.equal(fileIcon('application/pdf', 'a.pdf'), '📄');
 });
+
+// ---------- costs & budget ----------
+import { toHome, spreadCost, budgetSummary, parseAmount, guessCurrency, fmtMoney } from '../../travel-planner/js/budget.js';
+
+test('budget: amounts parse in common formats', () => {
+  assert.equal(parseAmount('1,234.50'), 1234.5);
+  assert.equal(parseAmount('1.234,50'), 1234.5);
+  assert.equal(parseAmount('12,5'), 12.5);
+  assert.equal(parseAmount('£80'), 80);
+  assert.equal(parseAmount('1,200'), 1200);
+  assert.equal(parseAmount(''), null);
+  assert.equal(parseAmount('abc'), null);
+  assert.equal(guessCurrency('en-GB'), 'GBP');
+  assert.equal(guessCurrency('de-DE'), 'EUR');
+  assert.equal(guessCurrency('xx'), 'USD');
+  assert.match(fmtMoney(12.5, 'GBP'), /12\.50/);
+});
+
+test('budget: currency conversion and spreading over nights', () => {
+  assert.equal(toHome(100, 'GBP', 'GBP'), 100);
+  assert.equal(toHome(100, 'EUR', 'GBP', { EUR: 0.85 }), 85);
+  assert.equal(toHome(100, 'USD', 'GBP', {}), null);
+  const s = spreadCost(hotel, 300);
+  assert.deepEqual(s, [{ date: '2026-12-01', amount: 100 }, { date: '2026-12-02', amount: 100 }, { date: '2026-12-03', amount: 100 }]);
+  assert.deepEqual(spreadCost(moma, 30), [{ date: '2026-12-02', amount: 30 }]);
+  assert.equal(spreadCost(car, 120).length, 3);
+});
+
+test('budget: summary totals, paid, by type and day, missing rates', () => {
+  const costed = [
+    { ...flight, cost: 500, currency: 'GBP', paid: true },
+    { ...hotel, cost: 300, currency: 'USD' },
+    { ...moma, cost: 25, currency: 'EUR' },
+    car, drive,
+  ];
+  const b = budgetSummary(costed, { currency: 'GBP', budget: 1000, rates: { USD: 0.8 } });
+  assert.equal(b.total, 500 + 240);
+  assert.equal(b.paid, 500);
+  assert.equal(b.unpaid, 240);
+  assert.equal(b.remaining, 260);
+  assert.equal(b.byType.flight, 500);
+  assert.equal(b.byType.hotel, 240);
+  assert.equal(b.byDay['2026-12-01'], 500 + 80);
+  assert.deepEqual(b.missingRates, ['EUR']);
+  assert.deepEqual(b.uncosted.map((i) => i.id), ['c1', 'd1']);
+  assert.equal(b.rows.length, 3);
+  assert.equal(budgetSummary([], {}).budget, null);
+});

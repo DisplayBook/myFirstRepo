@@ -249,6 +249,44 @@ async function main() {
       await shot(page, '08-map-day2');
     });
 
+    await check('costs on bookings and the budget screen', async () => {
+      // Hotel in GBP (paid), MoMA in USD (needs a rate).
+      await page.goto(`${BASE}#/today/2026-12-02`);
+      await page.getByRole('button', { name: /Staying at|Pick up car/ }).first().waitFor().catch(() => {});
+      await page.goto(`${BASE}#/plan`);
+      await page.getByRole('button', { name: /Check in · Hotel Penn/ }).click();
+      await page.getByLabel('Cost', { exact: true }).fill('600');
+      await page.getByLabel('Currency').selectOption('GBP');
+      await page.getByLabel('Already paid').check();
+      await save();
+      await page.getByRole('button', { name: /MoMA/ }).first().click();
+      await page.getByLabel('Cost', { exact: true }).fill('50');
+      await page.getByLabel('Currency').selectOption('USD');
+      await save();
+      await page.getByText('£600.00 · paid').first().waitFor();
+      await page.getByRole('link', { name: 'Budget' }).click();
+      await page.getByRole('heading', { name: 'Budget', level: 1 }).waitFor();
+      // The trip's home currency was set when it was created (USD on this test phone).
+      assert.equal(await page.getByLabel('Home currency').inputValue(), 'USD');
+      await page.getByLabel('Home currency').selectOption('GBP');
+      await page.getByLabel('Total budget').fill('1000');
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await page.getByText('Not counted yet: costs in USD').waitFor();
+      await page.getByLabel('GBP for 1 USD').fill('0.8');
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await page.getByText('Budget saved').waitFor();
+      await page.locator('.kpi', { hasText: '£640.00' }).waitFor();
+      await page.locator('.kpi', { hasText: '£360.00' }).waitFor();
+      assert.equal(await page.getByText('Not counted yet').count(), 0);
+      await page.getByText('64% of £1,000.00 budget').waitFor();
+      await page.getByText(/bookings? without a cost/).waitFor();
+      await shot(page, '08b-budget');
+      // Tapping a row opens the booking.
+      await page.locator('.cost-row', { hasText: 'MoMA' }).click();
+      await page.locator('#item-form').waitFor();
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+    });
+
     await check('trip settings: local-only sharing note, buffer change, calendar export', async () => {
       await page.getByRole('link', { name: 'Trip', exact: true }).click();
       await page.getByText('This trip is only on this device.').first().waitFor();
