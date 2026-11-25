@@ -8,6 +8,7 @@ import {
 import * as store from './store.js';
 import { searchPlaces, driveRoute, cachedRoute, currentPosition } from './geo.js';
 import { showMap, destroyMap } from './map.js';
+import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -22,6 +23,7 @@ const S = {
   trip: null, // {id, kind}
   meta: {},
   items: [],
+  files: [], // attached documents (metadata only)
   exists: null,
   status: { state: 'idle' },
   close: null,
@@ -64,15 +66,22 @@ window.addEventListener('hashchange', () => render());
 
 // ---------- trips ----------
 
+const prefetched = new Set();
+
 function openTrip(id, kind) {
   if (S.close) S.close();
   S.trip = { id, kind };
-  S.meta = {}; S.items = []; S.exists = null; S.sig = '';
+  S.meta = {}; S.items = []; S.files = []; S.exists = null; S.sig = '';
   S.settings = store.setSettings({ currentTrip: id });
   S.close = store.backendFor(kind).open(id, (data) => {
-    S.meta = data.meta; S.items = data.items; S.exists = data.exists;
+    S.meta = data.meta; S.items = data.items; S.files = data.files || []; S.exists = data.exists;
+    S.onFiles?.();
+    if (kind === 'cloud' && navigator.onLine && S.files.length && !prefetched.has(id)) {
+      prefetched.add(id);
+      setTimeout(() => store.backendFor('cloud').prefetch(id, S.files).catch(() => {}), 3000);
+    }
     if (data.meta.name) store.rememberTrip({ id, name: data.meta.name, kind });
-    const sig = JSON.stringify([data.meta, data.items]);
+    const sig = JSON.stringify([data.meta, data.items, S.files.map((f) => [f.id, f.itemId])]);
     if (sig !== S.sig) { S.sig = sig; render({ fromData: true }); }
   }, (st) => { S.status = st; renderStatus(); });
   renderStatus();
@@ -196,6 +205,8 @@ function eventMeta(ev) {
   return bits;
 }
 
+const docCount = (itemId) => S.files.filter((f) => f.itemId === itemId).length;
+
 function eventRow(ev) {
   const def = TYPES[ev.item.type];
   const time = timePart(ev.at);
@@ -206,6 +217,7 @@ function eventRow(ev) {
       <span class="ev-icon" aria-hidden="true">${def.icon}</span>
       <span class="ev-body"><strong>${esc(ev.label)}</strong>
         ${eventMeta(ev).map((b) => `<span class="ev-meta">${esc(b)}</span>`).join('')}
+        ${docCount(ev.item.id) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-docs">📎 ${docCount(ev.item.id)} document${docCount(ev.item.id) === 1 ? '' : 's'}</span>` : ''}
         ${ev.item.notes && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-notes">${esc(ev.item.notes)}</span>` : ''}
       </span>
     </button></li>`;
@@ -491,12 +503,17 @@ function renderTripSettings() {
       </form>
     </section>
     <section class="card">
+      <h2>Documents</h2>
+      ${S.files.length ? `<div id="all-docs"></div>` : '<p class="muted">Tickets, booking confirmations and photos you attach to bookings appear here.</p>'}
+    </section>
+    <section class="card">
       <h2>Export</h2>
       <div class="stack">
         <button type="button" class="btn ghost" id="ics">📅 Add to my calendar (.ics)</button>
         <button type="button" class="btn ghost" id="backup">⬇️ Download backup (JSON)</button>
         <label class="btn ghost filebtn">⬆️ Import a backup into this trip<input type="file" id="import" accept="application/json,.json"></label>
       </div>
+      ${S.files.length ? '<p class="muted small">The backup file contains your plans but not the attached documents.</p>' : ''}
     </section>
     <section class="card">
       <h2>Trips</h2>
@@ -507,6 +524,15 @@ function renderTripSettings() {
     </section>
     <p class="muted small center">Maps © OpenStreetMap contributors · Routes by OSRM · Place search by Nominatim</p>`;
 
+  const all = $('#all-docs');
+  if (all) {
+    const byItem = new Map();
+    for (const f of S.files) byItem.set(f.itemId, [...(byItem.get(f.itemId) || []), f]);
+    const groups = [...byItem.entries()].map(([itemId, files]) => ({ item: S.items.find((i) => i.id === itemId), files }))
+      .sort((a, b) => (a.item?.start || '~').localeCompare(b.item?.start || '~'));
+    all.innerHTML = groups.map((g, i) => `<div class="docgroup"><h3>${g.item ? `${TYPES[g.item.type].icon} ${esc(itemTitle(g.item))} <span class="muted small">${esc(fmtDate(datePart(g.item.start)))}</span>` : 'Deleted booking'}</h3><ul class="doclist" data-group="${i}"></ul></div>`).join('');
+    groups.forEach((g, i) => renderDocList($(`[data-group="${i}"]`, all), g.files));
+  }
   $('#meta-form').onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -641,7 +667,7 @@ function closeSheet() { if (sheet.open) sheet.close(); }
 sheet.addEventListener('click', (e) => {
   if (e.target === sheet || e.target.closest('[data-close]')) closeSheet();
 });
-sheet.addEventListener('close', () => { sheetBody.innerHTML = ''; });
+sheet.addEventListener('close', () => { sheetBody.innerHTML = ''; S.onFiles = null; });
 
 $('#fab').onclick = () => openAddChooser();
 
@@ -736,6 +762,7 @@ function openItemForm(type, existing, prefill = {}) {
       <button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
     ${fieldHtml}
     ${type === 'drive' ? '<div class="routebox" id="routebox" role="status" aria-live="polite"></div>' : ''}
+    <section class="docs" id="docs" aria-label="Documents"></section>
     <p class="error" id="form-err" role="alert" hidden></p>
     <div class="row sticky-actions">
       ${existing ? '<button type="button" class="btn danger ghost" id="del-item">Delete</button>' : ''}
@@ -792,6 +819,20 @@ function openItemForm(type, existing, prefill = {}) {
     const f = def.fields.find((x) => x.key === el.dataset.place);
     mountPlace(el, { label: f.label, value: draft[f.key], required: f.required, onChange: (p) => { draft[f.key] = p; updateRoute(); } });
   });
+  // Moving the start keeps the same duration, so the end never ends up before the start.
+  if (form.elements.start && form.elements.end) {
+    let prevStart = form.elements.start.value;
+    form.elements.start.addEventListener('change', () => {
+      const st = form.elements.start.value, en = form.elements.end.value;
+      if (st && en && prevStart) form.elements.end.value = addMinutes(en, diffMinutes(prevStart, st));
+      prevStart = st;
+    });
+  }
+
+  // New bookings keep picked files until Save; existing ones upload straight away.
+  const pending = [];
+  const docs = mountDocs($('#docs'), { itemId: draft.id, pending: existing ? null : pending });
+
   if (type === 'drive') {
     form.elements.start.addEventListener('change', updateRoute);
     form.elements.stopMin.addEventListener('change', updateRoute);
@@ -809,6 +850,7 @@ function openItemForm(type, existing, prefill = {}) {
     const item = cleanItem({ ...draft, updatedAt: new Date().toISOString(), updatedBy: S.settings.name });
     $('#save-item').disabled = true;
     try { await write((b, id) => b.saveItem(id, item)); } catch { $('#save-item').disabled = false; return; }
+    for (const p of pending) uploadDoc(item.id, p);
     closeSheet();
     toast(existing ? 'Saved' : `${def.label} added`);
     const d = datePart(item.start);
@@ -819,7 +861,14 @@ function openItemForm(type, existing, prefill = {}) {
     if (!confirm(`Delete "${itemTitle(existing)}"?`)) return;
     await write((b, id) => b.deleteItem(id, existing.id));
     closeSheet();
-    toast('Deleted', { label: 'Undo', run: () => write((b, id) => b.saveItem(id, existing)) });
+    let undone = false;
+    const tripId = S.trip.id;
+    toast('Deleted', { label: 'Undo', run: () => { undone = true; write((b, id) => b.saveItem(id, existing)); } });
+    // Remove its documents once the chance to undo has passed.
+    setTimeout(() => {
+      if (undone || S.trip?.id !== tripId || S.items.some((i) => i.id === existing.id)) return;
+      for (const f of S.files.filter((x) => x.itemId === existing.id)) write((b, id) => b.deleteFile(id, f)).catch(() => {});
+    }, 8000);
   };
 }
 
@@ -867,6 +916,114 @@ function openDriveCalc() {
       route: route && { ...route, from: `${st.from.lat},${st.from.lon}`, to: `${st.to.lat},${st.to.lon}` },
     });
   };
+}
+
+// ---------- documents ----------
+
+const blobCache = new Map(); // fileId -> Blob, for this session
+const urlCache = new Map(); // fileId -> object URL (one per file, kept while the app is open)
+function urlFor(f, blob) {
+  if (!urlCache.has(f.id)) urlCache.set(f.id, URL.createObjectURL(blob));
+  return urlCache.get(f.id);
+}
+
+async function loadDoc(f) {
+  if (blobCache.has(f.id)) return blobCache.get(f.id);
+  const blob = await backend().getFile(S.trip.id, f);
+  blobCache.set(f.id, blob);
+  return blob;
+}
+
+function uploadDoc(itemId, p) {
+  const meta = cleanItem({
+    id: uid(20), itemId, name: p.name, type: p.type, size: p.size,
+    addedBy: S.settings.name, addedAt: new Date().toISOString(),
+  });
+  blobCache.set(meta.id, p.blob);
+  return write((b, id) => b.addFile(id, meta, p.blob)).catch(() => blobCache.delete(meta.id));
+}
+
+/** List of documents with View / Share / Delete. */
+function renderDocList(ul, files, { onRemovePending } = {}) {
+  ul.innerHTML = files.map((f, i) => `<li class="doc" data-i="${i}">
+    <div class="doc-row">
+      <span class="doc-icon" aria-hidden="true">${fileIcon(f.type, f.name)}</span>
+      <span class="doc-name"><strong>${esc(f.name)}</strong>
+        <span class="muted small">${esc(fmtBytes(f.size))}${f.pending ? ' · uploads when you save' : ''}${f.addedBy ? ` · added by ${esc(f.addedBy)}` : ''}</span></span>
+      ${f.pending ? '' : `<button type="button" class="btn small ghost" data-doc="view" aria-label="View ${esc(f.name)}">View</button>`}
+      <button type="button" class="iconbtn small" data-doc="del" aria-label="Remove ${esc(f.name)}">🗑</button>
+    </div>
+    <div class="doc-view" hidden></div>
+  </li>`).join('');
+  ul.onclick = async (e) => {
+    const b = e.target.closest('[data-doc]');
+    if (!b) return;
+    const li = b.closest('.doc');
+    const f = files[+li.dataset.i];
+    if (b.dataset.doc === 'del') {
+      if (f.pending) { onRemovePending?.(f); return; }
+      if (!confirm(`Remove "${f.name}" for everyone on this trip?`)) return;
+      blobCache.delete(f.id);
+      if (urlCache.has(f.id)) { URL.revokeObjectURL(urlCache.get(f.id)); urlCache.delete(f.id); }
+      write((bk, id) => bk.deleteFile(id, f)).catch(() => {});
+      toast('Document removed');
+      return;
+    }
+    const view = $('.doc-view', li);
+    if (!view.hidden) { view.hidden = true; return; }
+    view.hidden = false;
+    view.innerHTML = '<p class="muted small" role="status">Loading…</p>';
+    try {
+      const blob = await loadDoc(f);
+      const url = urlFor(f, blob);
+      const file = typeof File === 'function' ? new File([blob], f.name, { type: f.type }) : null;
+      const canShare = !!(file && navigator.canShare && navigator.canShare({ files: [file] }));
+      view.innerHTML = `${isImage(f.type) ? `<img src="${url}" alt="${esc(f.name)}">` : ''}
+        <div class="row">
+          <a class="btn small" href="${url}" target="_blank" rel="noopener">Open</a>
+          ${canShare ? '<button type="button" class="btn small ghost" data-share>Share / Save to Files</button>' : `<a class="btn small ghost" href="${url}" download="${esc(f.name)}">Download</a>`}
+        </div>`;
+      const sh = $('[data-share]', view);
+      if (sh) sh.onclick = () => navigator.share({ files: [file], title: f.name }).catch(() => {});
+    } catch (err) {
+      view.innerHTML = `<p class="error small">${esc(err.message)}</p>`;
+    }
+  };
+}
+
+/** Documents section inside a booking form. */
+function mountDocs(el, { itemId, pending }) {
+  let lastSig = null;
+  const draw = () => {
+    const sig = JSON.stringify([S.files.filter((f) => f.itemId === itemId).map((f) => f.id), (pending || []).map((p) => p.id)]);
+    if (sig === lastSig) return;
+    lastSig = sig;
+    const saved = S.files.filter((f) => f.itemId === itemId).sort((a, b) => (a.addedAt || '').localeCompare(b.addedAt || ''));
+    const list = [...saved, ...(pending || []).map((p) => ({ ...p, pending: true }))];
+    el.innerHTML = `<h3>Documents</h3>
+      ${list.length ? '<ul class="doclist"></ul>' : '<p class="muted small">Attach tickets, booking confirmations or photos (PDF, images and more, up to 10 MB each).</p>'}
+      <p class="muted small" data-busy role="status" hidden>Preparing…</p>
+      <label class="btn ghost small filebtn">📎 Add document<input type="file" multiple accept="${ACCEPT}" aria-label="Add document"></label>`;
+    const ul = $('.doclist', el);
+    if (ul) renderDocList(ul, list, { onRemovePending: (f) => { pending.splice(pending.findIndex((p) => p.id === f.id), 1); draw(); } });
+    $('input[type=file]', el).onchange = async (e) => {
+      const picked = [...e.target.files];
+      e.target.value = '';
+      if (!picked.length) return;
+      $('[data-busy]', el).hidden = false;
+      for (const file of picked) {
+        try {
+          const p = await prepareFile(file);
+          if (pending) pending.push({ ...p, id: uid(8) });
+          else { uploadDoc(itemId, p); toast(`Added ${p.name}`); }
+        } catch (err) { toast(err.message); }
+      }
+      draw();
+    };
+  };
+  S.onFiles = draw;
+  draw();
+  return { draw };
 }
 
 // ---------- start ----------

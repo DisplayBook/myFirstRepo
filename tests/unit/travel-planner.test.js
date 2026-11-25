@@ -194,3 +194,30 @@ test('calendar export', () => {
   assert.match(ics, /UID:d1@trip-planner\r\nDTSTAMP:20261125T120000Z\r\nDTSTART:20261204T120000\r\nDTEND:20261204T154000/);
   assert.ok(ics.split('\r\n').every((l) => l.length <= 75));
 });
+
+// ---------- documents ----------
+import { splitBytes, joinBytes, fmtBytes, safeName, isPdf, fileIcon, CHUNK_BYTES } from '../../travel-planner/js/files.js';
+
+test('documents: bytes split into chunks under the Firestore limit and join back', () => {
+  const data = new Uint8Array(CHUNK_BYTES * 2 + 123).map((_, i) => i % 251);
+  const parts = splitBytes(data);
+  assert.equal(parts.length, 3);
+  assert.ok(parts.every((p) => p.length <= CHUNK_BYTES && p.length < 1000000));
+  assert.deepEqual(joinBytes(parts), data);
+  assert.equal(splitBytes(new Uint8Array(0)).length, 1, 'empty file still has one chunk');
+  assert.deepEqual(splitBytes(new Uint8Array([1, 2, 3, 4, 5]), 2).map((p) => [...p]), [[1, 2], [3, 4], [5]]);
+});
+
+test('documents: names, sizes and icons', () => {
+  assert.equal(fmtBytes(500), '500 B');
+  assert.equal(fmtBytes(2048), '2 KB');
+  assert.equal(fmtBytes(1.5 * 1024 * 1024), '1.5 MB');
+  assert.equal(safeName('C:\\Users\\me\\boarding<pass>.pdf'), 'boardingpass.pdf');
+  assert.equal(safeName(''), 'document');
+  const long = safeName(`${'x'.repeat(200)}.pdf`);
+  assert.equal(long.length, 80);
+  assert.ok(long.endsWith('.pdf'));
+  assert.ok(isPdf('', 'ticket.PDF'));
+  assert.equal(fileIcon('image/jpeg', 'a.jpg'), '🖼️');
+  assert.equal(fileIcon('application/pdf', 'a.pdf'), '📄');
+});

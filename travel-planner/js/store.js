@@ -9,8 +9,11 @@
 // Each trip is one document (trips/{tripId}) holding its settings, plus one
 // document per item (trips/{tripId}/items/{itemId}), so two people editing
 // different items at the same time never overwrite each other.
+// Attached documents: trips/{tripId}/files/{fileId} (name, size, which booking)
+// with the bytes in trips/{tripId}/files/{fileId}/chunks/{n}.
 
 import { firebaseConfig } from './config.js';
+import { splitBytes, joinBytes, CHUNK_BYTES, idbPut, idbGet, idbDel } from './files.js';
 
 const FIREBASE_VERSION = '10.14.1';
 const MY_TRIPS = 'tp:mytrips';
@@ -55,7 +58,9 @@ window.addEventListener('storage', (e) => {
 const local = {
   kind: 'local',
   open(id, onData, onStatus) {
-    const cb = (data) => onData(data ? { meta: data.meta || {}, items: Object.values(data.items || {}), exists: true } : { meta: {}, items: [], exists: false });
+    const cb = (data) => onData(data
+      ? { meta: data.meta || {}, items: Object.values(data.items || {}), files: Object.values(data.files || {}), exists: true }
+      : { meta: {}, items: [], files: [], exists: false });
     if (!listeners.has(id)) listeners.set(id, new Set());
     listeners.get(id).add(cb);
     onStatus({ state: 'local' });
@@ -81,10 +86,34 @@ const local = {
     writeJSON(tripKey(id), d);
     emitLocal(id);
   },
-  async deleteTrip(id) { localStorage.removeItem(tripKey(id)); emitLocal(id); },
+  async deleteTrip(id) {
+    const d = readJSON(tripKey(id), null);
+    await Promise.all(Object.keys(d?.files || {}).map((f) => idbDel(f).catch(() => {})));
+    localStorage.removeItem(tripKey(id));
+    emitLocal(id);
+  },
   async snapshot(id) {
     const d = readJSON(tripKey(id), null);
-    return d ? { meta: d.meta || {}, items: Object.values(d.items || {}) } : null;
+    return d ? { meta: d.meta || {}, items: Object.values(d.items || {}), files: Object.values(d.files || {}) } : null;
+  },
+  async addFile(id, meta, blob) {
+    await idbPut(meta.id, blob);
+    const d = readJSON(tripKey(id), { meta: {}, items: {} });
+    d.files = { ...d.files, [meta.id]: meta };
+    if (!writeJSON(tripKey(id), d)) { await idbDel(meta.id); throw new Error('Could not save: device storage is full'); }
+    emitLocal(id);
+  },
+  async getFile(id, meta) {
+    const blob = await idbGet(meta.id);
+    if (!blob) throw new Error('This document is missing from this device');
+    return blob;
+  },
+  async deleteFile(id, meta) {
+    await idbDel(meta.id).catch(() => {});
+    const d = readJSON(tripKey(id), { meta: {}, items: {} });
+    if (d.files) delete d.files[meta.id];
+    writeJSON(tripKey(id), d);
+    emitLocal(id);
   },
 };
 
@@ -102,7 +131,10 @@ function loadCloud() {
     const auth = authMod.getAuth(app);
     let db;
     try {
-      db = fs.initializeFirestore(app, { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) });
+      // Bigger offline cache than the default 40 MB, so documents stay available with no signal.
+      db = fs.initializeFirestore(app, {
+        localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager(), cacheSizeBytes: 200 * 1024 * 1024 }),
+      });
     } catch {
       db = fs.getFirestore(app);
     }
@@ -122,11 +154,11 @@ const cloud = {
   open(id, onData, onStatus) {
     let stopped = false;
     const unsubs = [];
-    let meta = null, metaExists = null, items = null;
+    let meta = null, metaExists = null, items = null, files = null;
     let metaMeta = null, itemsMeta = null;
     const send = () => {
-      if (items === null || metaExists === null) return;
-      onData({ meta: meta || {}, items, exists: metaExists || items.length > 0 });
+      if (items === null || metaExists === null || files === null) return;
+      onData({ meta: meta || {}, items, files, exists: metaExists || items.length > 0 });
       const fromCache = metaMeta?.fromCache || itemsMeta?.fromCache;
       const pending = metaMeta?.hasPendingWrites || itemsMeta?.hasPendingWrites;
       onStatus({ state: pending ? 'pending' : fromCache ? 'offline' : 'synced' });
@@ -143,6 +175,9 @@ const cloud = {
       unsubs.push(fs.onSnapshot(fs.collection(db, 'trips', id, 'items'), { includeMetadataChanges: true }, (snap) => {
         items = snap.docs.map((d) => ({ ...d.data(), id: d.id })); itemsMeta = snap.metadata; send();
       }, onErr));
+      unsubs.push(fs.onSnapshot(fs.collection(db, 'trips', id, 'files'), (snap) => {
+        files = snap.docs.map((d) => ({ ...d.data(), id: d.id })); send();
+      }, (err) => { files = []; send(); onErr(err); }));
     }).catch((err) => onStatus({ state: 'error', message: `Could not load sync (${err.message}). Are you online?` }));
     return () => { stopped = true; unsubs.forEach((u) => u()); };
   },
@@ -154,9 +189,42 @@ const cloud = {
   async deleteItem(id, itemId) { const { fs, db } = await loadCloud(); await fs.deleteDoc(fs.doc(db, 'trips', id, 'items', itemId)); },
   async deleteTrip(id) {
     const { fs, db } = await loadCloud();
+    const files = await fs.getDocs(fs.collection(db, 'trips', id, 'files'));
+    await Promise.all(files.docs.map((d) => cloud.deleteFile(id, { ...d.data(), id: d.id })));
     const snap = await fs.getDocs(fs.collection(db, 'trips', id, 'items'));
     await Promise.all(snap.docs.map((d) => fs.deleteDoc(d.ref)));
     await fs.deleteDoc(fs.doc(db, 'trips', id));
+  },
+  // Chunks are written first and the file's entry last, so nobody sees a
+  // half-uploaded file. Writes are queued in order, so this also works offline.
+  async addFile(id, meta, blob) {
+    const { fs, db } = await loadCloud();
+    const chunks = splitBytes(new Uint8Array(await blob.arrayBuffer()), CHUNK_BYTES);
+    const writes = chunks.map((c, i) => fs.setDoc(fs.doc(db, 'trips', id, 'files', meta.id, 'chunks', String(i)), { i, b: fs.Bytes.fromUint8Array(c) }));
+    writes.push(fs.setDoc(fs.doc(db, 'trips', id, 'files', meta.id), { ...meta, chunks: chunks.length }));
+    await Promise.all(writes);
+  },
+  async getFile(id, meta) {
+    const { fs, db } = await loadCloud();
+    const snap = await fs.getDocs(fs.collection(db, 'trips', id, 'files', meta.id, 'chunks'));
+    const parts = snap.docs.map((d) => d.data()).sort((a, b) => a.i - b.i);
+    if (parts.length < (meta.chunks || 1)) throw new Error(navigator.onLine ? 'This document is still uploading. Try again in a moment.' : 'This document isn\'t saved on this device yet. Open it once while online.');
+    return new Blob([joinBytes(parts.map((p) => p.b.toUint8Array()))], { type: meta.type || 'application/octet-stream' });
+  },
+  async deleteFile(id, meta) {
+    const { fs, db } = await loadCloud();
+    const n = Math.max(1, meta.chunks || 1);
+    await Promise.all([
+      fs.deleteDoc(fs.doc(db, 'trips', id, 'files', meta.id)),
+      ...Array.from({ length: n }, (_, i) => fs.deleteDoc(fs.doc(db, 'trips', id, 'files', meta.id, 'chunks', String(i)))),
+    ]);
+  },
+  /** Download every document into the offline cache (one at a time, in the background). */
+  async prefetch(id, files) {
+    const { fs, db } = await loadCloud();
+    for (const f of files) {
+      try { await fs.getDocsFromServer(fs.collection(db, 'trips', id, 'files', f.id, 'chunks')); } catch { return; }
+    }
   },
 };
 
@@ -168,6 +236,10 @@ export async function moveToCloud(id) {
   if (!snap) throw new Error('Trip not found on this device');
   await cloud.create(id, snap.meta);
   await Promise.all(snap.items.map((it) => cloud.saveItem(id, it)));
+  for (const f of snap.files) {
+    const blob = await local.getFile(id, f).catch(() => null);
+    if (blob) await cloud.addFile(id, f, blob);
+  }
   rememberTrip({ id, name: snap.meta.name, kind: 'cloud' });
   await local.deleteTrip(id);
 }

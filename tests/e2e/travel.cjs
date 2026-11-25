@@ -23,6 +23,8 @@ const PLACES = {
   jfk: { name: 'John F. Kennedy International Airport', display_name: 'John F. Kennedy International Airport, Queens, New York, USA', lat: '40.6413', lon: '-73.7781' },
 };
 
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64');
+
 function encode(points) {
   let out = '', pl = 0, pn = 0;
   const enc = (v) => { v = v < 0 ? ~(v << 1) : v << 1; let s = ''; while (v >= 0x20) { s += String.fromCharCode((0x20 | (v & 0x1f)) + 63); v >>= 5; } return s + String.fromCharCode(v + 63); };
@@ -63,7 +65,7 @@ async function main() {
       const d = km(coords[0], coords[1]) * 1.3; // road km
       route.fulfill({ json: { code: 'Ok', routes: [{ duration: d * 60 + 300, distance: d * 1000, geometry: encode(coords) }] } });
     });
-    await context.route('https://tile.openstreetmap.org/**', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64') }));
+    await context.route('https://tile.openstreetmap.org/**', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
 
     const page = await context.newPage();
     const errors = [];
@@ -143,6 +145,41 @@ async function main() {
       await shot(page, '03-today');
     });
 
+    await check('attach documents to a booking, view them, add and remove more', async () => {
+      // A new booking keeps picked files until Save.
+      await add('Activity');
+      await page.getByLabel('What').fill('Broadway show');
+      await page.getByLabel('Starts').fill('2026-12-02T19:30');
+      await page.locator('#docs input[type=file]').setInputFiles([
+        { name: 'tickets.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 fake ticket') },
+        { name: 'seat-map.png', mimeType: 'image/png', buffer: PNG },
+      ]);
+      await page.locator('#docs').getByText('uploads when you save').first().waitFor();
+      assert.equal(await page.locator('#docs .doc').count(), 2);
+      await save();
+      const ev = page.locator('.ev', { hasText: 'Broadway show' });
+      await ev.getByText('📎 2 documents').waitFor();
+      // Open the booking: view the image, add one more, remove the PDF.
+      await ev.click();
+      await page.getByRole('button', { name: 'View seat-map.png' }).click();
+      await page.locator('.doc-view img').waitFor();
+      assert.match(await page.locator('.doc-view a', { hasText: 'Open' }).getAttribute('href'), /^blob:/);
+      await shot(page, '03b-docs');
+      await page.locator('#docs input[type=file]').setInputFiles({ name: 'receipt.txt', mimeType: 'text/plain', buffer: Buffer.from('paid') });
+      await page.locator('#docs').getByText('receipt.txt').waitFor();
+      page.once('dialog', (d) => d.accept());
+      await page.getByRole('button', { name: 'Remove tickets.pdf' }).click();
+      await page.getByRole('button', { name: 'Remove tickets.pdf' }).waitFor({ state: 'detached' });
+      assert.equal(await page.locator('#docs .doc').count(), 2);
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+      await ev.getByText('📎 2 documents').waitFor();
+      // Files over the limit are refused.
+      await ev.click();
+      await page.locator('#docs input[type=file]').setInputFiles({ name: 'huge.pdf', mimeType: 'application/pdf', buffer: Buffer.alloc(11 * 1024 * 1024) });
+      await page.getByText(/The limit is 10 MB/).waitFor();
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+    });
+
     await check('a plan you can\'t reach in time is flagged', async () => {
       await add('Activity');
       await page.getByLabel('What').fill('Lunch in Boston');
@@ -215,6 +252,9 @@ async function main() {
     await check('trip settings: local-only sharing note, buffer change, calendar export', async () => {
       await page.getByRole('link', { name: 'Trip', exact: true }).click();
       await page.getByText('This trip is only on this device.').first().waitFor();
+      await page.getByRole('heading', { name: /Broadway show/ }).waitFor();
+      await page.getByRole('button', { name: 'View receipt.txt' }).click();
+      await page.locator('.doc-view a', { hasText: 'Open' }).waitFor();
       await page.getByLabel('Extra time added to drive estimates').selectOption('30');
       await page.getByRole('button', { name: 'Save', exact: true }).click();
       await page.getByText('Trip saved').waitFor();
@@ -231,6 +271,7 @@ async function main() {
       await page.reload();
       await page.getByText('Staying at Hotel Penn').waitFor();
       await page.locator('.leg').first().getByText(/About .* drive/).waitFor();
+      await page.locator('.ev', { hasText: 'Broadway show' }).getByText('📎 2 documents').waitFor();
       assert.equal(routeCalls, before, 'no new route requests');
       assert.match(await page.locator('.hint').textContent(), /30% buffer/);
     });

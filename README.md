@@ -122,7 +122,8 @@ A third, separate app: an installable web app (works in any browser and on iPhon
 - **Map:** every place on an OpenStreetMap map. Flights show as arcs, drives follow the actual roads, and you can filter by day. Tap a pin for details and directions.
 - **Place search:** type a place, address or airport and pick from the results. Places you've already used show up as one-tap chips, and you can use your current location.
 - **Sharing:** with sync turned on (below), everyone with the trip link sees the same plan and can edit it. Changes appear within seconds, and it works offline (changes sync when you're back online). It shows who last edited each item.
-- **Export:** add everything to your calendar (.ics), or download/import a JSON backup.
+- **Documents:** attach tickets, booking confirmations, PDFs and photos to any booking (up to 10 MB each; large photos are shrunk automatically). Bookings with documents show a 📎 on the timeline, and **Trip → Documents** lists them all in one place. Tap **View** to preview, open, or **Share / Save to Files**. On shared trips everyone sees the documents, and the app downloads them in the background so they're there at the airport with no signal.
+- **Export:** add everything to your calendar (.ics), or download/import a JSON backup (plans only, not documents).
 
 URL once GitHub Pages is on: `https://<user>.github.io/<repo>/travel-planner/`. On iPhone: Safari → Share → **Add to Home Screen**.
 
@@ -150,6 +151,8 @@ Without this, trips are saved only on the device you made them on. To share live
 7. Commit, push, and bump `VERSION` in `travel-planner/sw.js`.
 
 Now new trips are shared. In the app, go to **Trip → Share link** and send the link (Messages, WhatsApp, email). When someone opens it, the trip is added to their app. Trips you made before turning on sync have a **Move to shared sync** button.
+
+**Documents** are stored in the same Firestore database (split into chunks under 1 MB), so you don't need Firebase Storage, which requires the paid plan on new projects. The free tier includes 1 GB of Firestore storage. If you set up sync before documents were added, paste the updated `firestore.rules` again.
 
 **Who can see a trip:** anyone who has its link. The link contains a long random code that can't be guessed, and the rules stop anyone from listing trips. Treat it like a password, and only send it to people you want editing the plan. The free Firebase tier (50k reads / 20k writes per day) is far more than a family trip needs.
 
