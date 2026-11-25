@@ -59,8 +59,8 @@ const local = {
   kind: 'local',
   open(id, onData, onStatus) {
     const cb = (data) => onData(data
-      ? { meta: data.meta || {}, items: Object.values(data.items || {}), files: Object.values(data.files || {}), exists: true }
-      : { meta: {}, items: [], files: [], exists: false });
+      ? { meta: data.meta || {}, items: Object.values(data.items || {}), files: Object.values(data.files || {}), role: 'admin', exists: true }
+      : { meta: {}, items: [], files: [], role: 'admin', exists: false });
     if (!listeners.has(id)) listeners.set(id, new Set());
     listeners.get(id).add(cb);
     onStatus({ state: 'local' });
@@ -134,8 +134,11 @@ function loadCloud() {
     const [appMod, authMod, fs] = await Promise.all([
       import(`${base}firebase-app.js`), import(`${base}firebase-auth.js`), import(`${base}firebase-firestore.js`),
     ]);
-    const app = appMod.initializeApp(firebaseConfig);
+    const { emulators, ...config } = firebaseConfig;
+    const app = appMod.initializeApp(config);
     const auth = authMod.getAuth(app);
+    // Local testing only: talk to the Firebase emulators instead of the real project.
+    if (emulators) authMod.connectAuthEmulator(auth, `http://${emulators.auth}`, { disableWarnings: true });
     let db;
     try {
       // Bigger offline cache than the default 40 MB, so documents stay available with no signal.
@@ -145,15 +148,25 @@ function loadCloud() {
     } catch {
       db = fs.getFirestore(app);
     }
+    if (emulators) {
+      const [host, port] = emulators.firestore.split(':');
+      fs.connectFirestoreEmulator(db, host, Number(port));
+    }
     // Anonymous sign-in: no accounts, but the security rules can require a signed-in app.
     const signedIn = new Promise((resolve) => {
       const stop = authMod.onAuthStateChanged(auth, (u) => { if (u) { stop(); resolve(u); } });
       authMod.signInAnonymously(auth).catch(() => { /* offline: cached session or cached data still work */ });
     });
-    return { fs, db, signedIn };
+    return { fs, db, auth, signedIn };
   })();
   cloudPromise.catch(() => { cloudPromise = null; });
   return cloudPromise;
+}
+
+function newCode() {
+  const a = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  const b = crypto.getRandomValues(new Uint8Array(24));
+  return Array.from(b, (x) => a[x % 62]).join('');
 }
 
 const cloud = {
@@ -161,20 +174,29 @@ const cloud = {
   open(id, onData, onStatus) {
     let stopped = false;
     const unsubs = [];
-    let meta = null, metaExists = null, items = null, files = null;
+    let meta = null, metaExists = null, items = null, files = null, role = null;
     let metaMeta = null, itemsMeta = null;
     const send = () => {
-      if (items === null || metaExists === null || files === null) return;
-      onData({ meta: meta || {}, items, files, exists: metaExists || items.length > 0 });
+      if (items === null || metaExists === null || files === null || role === null) return;
+      onData({ meta: meta || {}, items, files, role, exists: metaExists || items.length > 0 });
       const fromCache = metaMeta?.fromCache || itemsMeta?.fromCache;
       const pending = metaMeta?.hasPendingWrites || itemsMeta?.hasPendingWrites;
       onStatus({ state: pending ? 'pending' : fromCache ? 'offline' : 'synced' });
     };
     onStatus({ state: 'connecting' });
-    loadCloud().then(async ({ fs, db, signedIn }) => {
+    loadCloud().then(async ({ fs, db, auth, signedIn }) => {
       // Wait briefly for sign-in so the first read isn't refused; carry on offline.
       await Promise.race([signedIn, new Promise((r) => setTimeout(r, 4000))]);
       if (stopped) return;
+      // This device is an admin of the trip if trips/{id}/admins/{uid} exists.
+      const uid = auth.currentUser?.uid;
+      if (uid) {
+        unsubs.push(fs.onSnapshot(fs.doc(db, 'trips', id, 'admins', uid), (snap) => {
+          role = snap.exists() ? 'admin' : 'viewer'; send();
+        }, () => { role = 'viewer'; send(); }));
+      } else {
+        role = 'viewer';
+      }
       const onErr = (err) => onStatus({ state: 'error', message: err.code === 'permission-denied' ? 'Access refused by the database rules' : err.message });
       unsubs.push(fs.onSnapshot(fs.doc(db, 'trips', id), { includeMetadataChanges: true }, (snap) => {
         meta = snap.data() || null; metaExists = snap.exists(); metaMeta = snap.metadata; send();
@@ -190,7 +212,45 @@ const cloud = {
   },
   // Writes resolve when the server confirms. Offline they are queued by Firestore,
   // so callers shouldn't wait for them before updating the screen.
-  async create(id, meta) { const { fs, db } = await loadCloud(); await fs.setDoc(fs.doc(db, 'trips', id), meta, { merge: true }); },
+  // The trip, its owner's admin entry and the first admin-link code are written
+  // together; the rules check them as one batch.
+  async create(id, meta) {
+    const { fs, db, auth, signedIn } = await loadCloud();
+    await Promise.race([signedIn, new Promise((_, no) => setTimeout(() => no(new Error('Connect to the internet to create a shared trip')), 10000))]);
+    const uid = auth.currentUser.uid;
+    const at = new Date().toISOString();
+    const batch = fs.writeBatch(db);
+    batch.set(fs.doc(db, 'trips', id), { ...meta, owner: uid });
+    batch.set(fs.doc(db, 'trips', id, 'admins', uid), { at });
+    batch.set(fs.doc(db, 'trips', id, 'invites', newCode()), { at });
+    await batch.commit();
+  },
+  /** Become an admin with the code from an admin link. Rejects if the code isn't valid. */
+  async joinAsAdmin(id, code, name = '') {
+    const { fs, db, auth, signedIn } = await loadCloud();
+    await Promise.race([signedIn, new Promise((_, no) => setTimeout(() => no(new Error('Connect to the internet to use an admin link')), 10000))]);
+    const data = { at: new Date().toISOString(), code };
+    if (name) data.name = name.slice(0, 60);
+    await fs.setDoc(fs.doc(db, 'trips', id, 'admins', auth.currentUser.uid), data);
+  },
+  /** The current admin-link code (admins only). */
+  async adminCode(id) {
+    const { fs, db } = await loadCloud();
+    const snap = await fs.getDocs(fs.collection(db, 'trips', id, 'invites'));
+    const codes = snap.docs.map((d) => ({ code: d.id, at: d.data().at || '' })).sort((a, b) => b.at.localeCompare(a.at));
+    return codes[0]?.code || cloud.resetAdminCode(id);
+  },
+  /** Make a new admin-link code; old admin links stop working (existing admins stay). */
+  async resetAdminCode(id) {
+    const { fs, db } = await loadCloud();
+    const snap = await fs.getDocs(fs.collection(db, 'trips', id, 'invites'));
+    const code = newCode();
+    const batch = fs.writeBatch(db);
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    batch.set(fs.doc(db, 'trips', id, 'invites', code), { at: new Date().toISOString() });
+    await batch.commit();
+    return code;
+  },
   async saveMeta(id, meta) { const { fs, db } = await loadCloud(); await fs.setDoc(fs.doc(db, 'trips', id), meta, { merge: true }); },
   async saveItem(id, item) { const { fs, db } = await loadCloud(); await fs.setDoc(fs.doc(db, 'trips', id, 'items', item.id), item); },
   async deleteItem(id, itemId) { const { fs, db } = await loadCloud(); await fs.deleteDoc(fs.doc(db, 'trips', id, 'items', itemId)); },
@@ -200,7 +260,14 @@ const cloud = {
     await Promise.all(files.docs.map((d) => cloud.deleteFile(id, { ...d.data(), id: d.id })));
     const snap = await fs.getDocs(fs.collection(db, 'trips', id, 'items'));
     await Promise.all(snap.docs.map((d) => fs.deleteDoc(d.ref)));
+    const invites = await fs.getDocs(fs.collection(db, 'trips', id, 'invites'));
+    await Promise.all(invites.docs.map((d) => fs.deleteDoc(d.ref)));
     await fs.deleteDoc(fs.doc(db, 'trips', id));
+    // Admin entries last (deleting needs admin rights), this device's own very last.
+    const uid = (await loadCloud()).auth.currentUser?.uid;
+    const admins = await fs.getDocs(fs.collection(db, 'trips', id, 'admins'));
+    await Promise.all(admins.docs.filter((d) => d.id !== uid).map((d) => fs.deleteDoc(d.ref)));
+    if (uid) await fs.deleteDoc(fs.doc(db, 'trips', id, 'admins', uid)).catch(() => {});
   },
   // Chunks are written first and the file's entry last, so nobody sees a
   // half-uploaded file. Writes are queued in order, so this also works offline.

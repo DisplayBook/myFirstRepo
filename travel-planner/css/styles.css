@@ -267,6 +267,13 @@ textarea { resize: vertical; }
 .doc-text summary { cursor: pointer; font-weight: 600; color: var(--accent); min-height: 36px; display: flex; align-items: center; }
 .doc-text pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .85rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border-radius: 8px; padding: 10px; max-height: 50vh; overflow: auto; margin: 6px 0; }
 
+/* ---------- sharing & view only ---------- */
+fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
+fieldset.plain:disabled input, fieldset.plain:disabled select, fieldset.plain:disabled textarea { opacity: 1; color: var(--text); -webkit-text-fill-color: var(--text); background: var(--card); }
+fieldset.plain:disabled .place-quick, fieldset.plain:disabled .place-chosen .link, fieldset.plain:disabled .place-search { display: none; }
+#share-card h3 { font-size: 1rem; margin: 4px 0 2px; }
+.mt { margin-top: 18px !important; }
+
 /* ---------- plan ---------- */
 .plan-day { margin: 18px 0; }
 .plan-head { display: flex; justify-content: space-between; align-items: center; color: var(--text); text-decoration: none; font-weight: 700; padding: 6px 2px; min-height: 40px; border-bottom: 1px solid var(--line); }

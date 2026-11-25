@@ -9,7 +9,14 @@
     "test": "node --test tests/unit/*.test.js",
     "test:e2e": "node tests/e2e/run.cjs",
     "test:e2e:travel": "node tests/e2e/travel.cjs",
-    "icons": "node scripts/make-icons.cjs"
+    "icons": "node scripts/make-icons.cjs",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-trips \"node --test tests/rules/firestore-rules.test.mjs\"",
+    "test:e2e:cloud": "firebase emulators:exec --only firestore,auth --project demo-trips \"node tests/e2e/cloud.cjs\""
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^3.0.4",
+    "firebase": "10.14.1",
+    "firebase-tools": "^15.37.0"
+  }
 }

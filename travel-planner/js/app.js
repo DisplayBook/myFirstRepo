@@ -26,6 +26,7 @@ const S = {
   meta: {},
   items: [],
   files: [], // attached documents (metadata only)
+  role: 'admin', // 'admin' can edit; 'viewer' opened a view-only link
   exists: null,
   status: { state: 'idle' },
   close: null,
@@ -60,11 +61,15 @@ function toast(msg, action) {
 
 function parseRoute() {
   const h = location.hash.replace(/^#\/?/, '');
-  const [name = '', arg = ''] = h.split('/');
-  return { name, arg: decodeURIComponent(arg) };
+  const [name = '', arg = '', arg2 = ''] = h.split('/');
+  return { name, arg: decodeURIComponent(arg), arg2: decodeURIComponent(arg2) };
 }
 const go = (hash) => { if (location.hash === hash) render(); else location.hash = hash; };
-window.addEventListener('hashchange', () => render());
+window.addEventListener('hashchange', () => {
+  // Moving to another screen closes any open form or sheet.
+  if (sheet.open) sheet.close();
+  render();
+});
 
 // ---------- trips ----------
 
@@ -73,10 +78,12 @@ const prefetched = new Set();
 function openTrip(id, kind) {
   if (S.close) S.close();
   S.trip = { id, kind };
-  S.meta = {}; S.items = []; S.files = []; S.exists = null; S.sig = '';
+  S.meta = {}; S.items = []; S.files = []; S.exists = null; S.sig = ''; S.role = kind === 'cloud' ? 'viewer' : 'admin';
   S.settings = store.setSettings({ currentTrip: id });
   S.close = store.backendFor(kind).open(id, (data) => {
+    const roleChanged = S.role !== (data.role || 'admin');
     S.meta = data.meta; S.items = data.items; S.files = data.files || []; S.exists = data.exists;
+    S.role = data.role || 'admin';
     S.onFiles?.();
     if (kind === 'cloud' && navigator.onLine && S.files.length && !prefetched.has(id)) {
       prefetched.add(id);
@@ -84,15 +91,19 @@ function openTrip(id, kind) {
     }
     if (data.meta.name) store.rememberTrip({ id, name: data.meta.name, kind });
     const sig = JSON.stringify([data.meta, data.items, S.files.map((f) => [f.id, f.itemId])]);
-    if (sig !== S.sig) { S.sig = sig; render({ fromData: true }); }
+    if (sig !== S.sig || roleChanged) { S.sig = sig; render({ fromData: true }); }
   }, (st) => { S.status = st; renderStatus(); });
   renderStatus();
 }
 
 function backend() { return store.backendFor(S.trip.kind); }
 
+/** Admin devices can change the trip; view-only devices can't. */
+const canEdit = () => S.role !== 'viewer';
+
 /** Run a write. Local writes are awaited; cloud writes are optimistic (they also work offline). */
 async function write(fn) {
+  if (!canEdit()) { toast('This trip is view only on this device'); throw new Error('view only'); }
   const p = fn(backend(), S.trip.id);
   if (S.trip.kind === 'cloud') { p.catch((e) => toast(`Not saved: ${e.message}`)); return; }
   try { await p; } catch (e) { toast(e.message); throw e; }
@@ -109,23 +120,29 @@ async function createTrip({ name, start, end }) {
   go('#/today');
 }
 
-function joinTrip(id) {
+function joinTrip(id, code = '') {
+  // Don't leave the admin code in the address bar or browser history.
+  history.replaceState(null, '', `${location.pathname}#/today`);
   const known = store.myTrips().find((t) => t.id === id);
-  if (known) { openTrip(known.id, known.kind); go('#/today'); return; }
+  if (known?.kind === 'local') { openTrip(known.id, 'local'); render(); return; }
   if (!store.cloudConfigured()) {
     go('#/trips');
     toast('This link is for a shared trip, but this copy of the app is not connected to shared sync.');
     return;
   }
-  store.rememberTrip({ id, name: 'Shared trip', kind: 'cloud' });
+  if (!known) store.rememberTrip({ id, name: 'Shared trip', kind: 'cloud' });
   openTrip(id, 'cloud');
-  go('#/today');
-  toast('Trip added to your list');
+  render();
+  if (!code) { if (!known) toast('Trip added (view only)'); return; }
+  store.backendFor('cloud').joinAsAdmin(id, code, S.settings.name)
+    .then(() => toast('You can now edit this trip'))
+    .catch((e) => toast(e.code === 'permission-denied'
+      ? 'This admin link is no longer valid. You can still view the trip.'
+      : `Couldn't add you as an admin: ${e.message}`));
 }
 
-function shareLink() {
-  return `${location.origin}${location.pathname}#/join/${S.trip.id}`;
-}
+const viewLink = () => `${location.origin}${location.pathname}#/join/${S.trip.id}`;
+const adminLink = (code) => `${location.origin}${location.pathname}#/join/${S.trip.id}/${code}`;
 
 // ---------- status pill ----------
 
@@ -143,7 +160,8 @@ function renderStatus() {
     error: [S.status.message || 'Sync error', 'bad'],
     idle: ['', 'muted'],
   };
-  const [text, cls] = map[S.status.state] || map.idle;
+  let [text, cls] = map[S.status.state] || map.idle;
+  if (S.trip.kind === 'cloud' && !canEdit() && S.status.state !== 'error') [text, cls] = ['👁 View only', 'muted'];
   el.hidden = !text;
   el.className = `sync ${cls}`;
   el.textContent = text;
@@ -153,13 +171,13 @@ function renderStatus() {
 
 function render({ fromData = false } = {}) {
   const r = parseRoute();
-  if (r.name === 'join') { if (isTripId(r.arg)) joinTrip(r.arg); else go('#/trips'); return; }
+  if (r.name === 'join') { if (isTripId(r.arg)) joinTrip(r.arg, /^[0-9A-Za-z]{20,40}$/.test(r.arg2) ? r.arg2 : ''); else go('#/trips'); return; }
   if (!S.trip && r.name !== 'trips') { go('#/trips'); return; }
   const name = r.name || 'today';
   // Don't rebuild the map for status-only updates while you're looking at it.
   if (fromData && name === 'map' && sheet.open) return;
   $$('.tabbar a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.tab === name));
-  $('#fab').hidden = name === 'trips' || !S.trip;
+  $('#fab').hidden = name === 'trips' || !S.trip || !canEdit();
   document.body.dataset.view = name;
   if (name !== 'map') destroyMap();
   const keepScroll = fromData ? window.scrollY : 0;
@@ -326,7 +344,7 @@ function renderToday(arg) {
     ${banner}
     ${next}
     ${ctx.length ? `<div class="ctx">${ctx.map((c) => `<span>${c}</span>`).join('')}</div>` : ''}
-    ${ag.events.length || legs.length ? `<ol class="timeline">${rows}</ol>` : `<div class="empty"><p>Nothing planned for this day.</p><button type="button" class="btn" data-add>Add something</button></div>`}
+    ${ag.events.length || legs.length ? `<ol class="timeline">${rows}</ol>` : `<div class="empty"><p>Nothing planned for this day.</p>${canEdit() ? '<button type="button" class="btn" data-add>Add something</button>' : ''}</div>`}
     ${ag.tonight ? `<p class="tonight">🌙 Tonight: <strong>${esc(ag.tonight.title)}</strong>${ag.tonight.place?.name ? ` · ${esc(shortName(ag.tonight.place))}` : ''}</p>` : ''}
     <p class="hint muted">Drive times are estimates without live traffic, plus ${bufferPct()}% buffer (change in Trip).</p>`;
   fillLegs(legs, main);
@@ -341,7 +359,7 @@ function renderPlan() {
   const today = localDate();
   if (!S.items.length) {
     main.innerHTML = `<h1>Plan</h1><div class="empty"><p>No plans yet. Add flights, hotels, car hire, drives and activities.</p>
-      <button type="button" class="btn" data-add>Add the first item</button></div>`;
+      ${canEdit() ? '<button type="button" class="btn" data-add>Add the first item</button>' : ''}</div>`;
     return;
   }
   const counts = Object.fromEntries(Object.keys(TYPES).map((k) => [k, S.items.filter((i) => i.type === k).length]));
@@ -524,7 +542,7 @@ function renderBudget() {
           <span class="cost-amt link">Add cost</span></button></li>`).join('')}</ul></details>` : ''}
     </section>
 
-    <section class="card">
+    <section class="card" ${canEdit() ? '' : 'hidden'}>
       <h2>Budget settings</h2>
       <form id="budget-form" class="form">
         <div class="two">
@@ -565,11 +583,18 @@ function renderTripSettings() {
   const m = S.meta;
   const cloud = S.trip.kind === 'cloud';
   const configured = store.cloudConfigured();
+  const admin = canEdit();
   const share = cloud ? `
-      <p>Everyone with this link sees the same plan and can edit it. Changes appear for everyone within seconds, and work offline too.</p>
-      <div class="sharebox"><input id="share-link" readonly value="${esc(shareLink())}" aria-label="Share link"></div>
-      <div class="row"><button type="button" class="btn" id="share-btn">Share link</button><button type="button" class="btn ghost" id="copy-btn">Copy</button></div>
-      <p class="muted small">Treat the link like a password: anyone who has it can change the plan.</p>`
+      <h3>👁 View link</h3>
+      <p>For family and friends. They see the whole plan, documents and budget, updated live, but can't change anything.</p>
+      <div class="sharebox"><input id="view-link" readonly value="${esc(viewLink())}" aria-label="View link"></div>
+      <div class="row"><button type="button" class="btn" data-share-link="view">Share view link</button><button type="button" class="btn ghost" data-copy-link="view">Copy</button></div>
+      ${admin ? `<h3 class="mt">✏️ Admin link</h3>
+      <p>Only for people who should edit the plan. Opening it makes that phone an admin of this trip.</p>
+      <div id="admin-box"><button type="button" class="btn ghost" id="show-admin">Show admin link</button></div>
+      <p class="muted small">If the admin link gets passed on by mistake, make a new one: the old link stops working (phones that are already admins stay admins).</p>`
+      : `<p class="muted small mt">This phone can only view this trip. To edit, open the <strong>admin link</strong> from the person who manages it, from inside this app (Trips → Join a shared trip).</p>`}
+      <p class="muted small">Anyone with either link can see the booking references and documents, so only send them to people you trust.</p>`
     : configured ? `
       <p>This trip is only on this device. Move it to shared sync to get a link you can send to others.</p>
       <button type="button" class="btn" id="move-cloud">Move to shared sync</button>`
@@ -580,7 +605,7 @@ function renderTripSettings() {
   main.innerHTML = `<h1>Trip</h1>
     <section class="card">
       <h2>Details</h2>
-      <form id="meta-form" class="form">
+      <form id="meta-form"><fieldset class="plain form" ${admin ? '' : 'disabled'}>
         <label>Trip name<input name="name" required value="${esc(m.name || '')}"></label>
         <div class="two">
           <label>First day<input type="date" name="start" value="${esc(m.start || '')}"></label>
@@ -590,10 +615,10 @@ function renderTripSettings() {
           <select name="bufferPct">${[0, 10, 20, 30, 40].map((p) => `<option value="${p}" ${bufferPct() === p ? 'selected' : ''}>${p ? `+${p}%` : 'None'}</option>`).join('')}</select>
         </label>
         <p class="muted small">Dates fill in automatically from your plans. These settings are shared with everyone on the trip.</p>
-        <button class="btn">Save</button>
-      </form>
+        ${admin ? '<button class="btn">Save</button>' : ''}
+      </fieldset></form>
     </section>
-    <section class="card"><h2>Share</h2>${share}</section>
+    <section class="card" id="share-card"><h2>Share</h2>${share}</section>
     <section class="card">
       <h2>On this device</h2>
       <form id="prefs" class="form">
@@ -625,7 +650,7 @@ function renderTripSettings() {
       <div class="stack">
         <button type="button" class="btn ghost" id="ics">📅 Add to my calendar (.ics)</button>
         <button type="button" class="btn ghost" id="backup">⬇️ Download backup (JSON)</button>
-        <label class="btn ghost filebtn">⬆️ Import a backup into this trip<input type="file" id="import" accept="application/json,.json"></label>
+        ${admin ? '<label class="btn ghost filebtn">⬆️ Import a backup into this trip<input type="file" id="import" accept="application/json,.json"></label>' : ''}
       </div>
       ${S.files.length ? '<p class="muted small">The backup file contains your plans but not the attached documents.</p>' : ''}
     </section>
@@ -633,7 +658,8 @@ function renderTripSettings() {
       <h2>Trips</h2>
       <div class="stack">
         <a class="btn ghost" href="#/trips">All trips / new trip</a>
-        <button type="button" class="btn danger" id="del-trip">Delete this trip${cloud ? ' for everyone' : ''}</button>
+        ${admin ? `<button type="button" class="btn danger" id="del-trip">Delete this trip${cloud ? ' for everyone' : ''}</button>` : ''}
+        ${cloud ? '<button type="button" class="btn ghost" id="forget-trip">Remove from this device</button>' : ''}
       </div>
     </section>
     <p class="muted small center">Maps © OpenStreetMap contributors · Routes by OSRM · Place search by Nominatim</p>`;
@@ -672,11 +698,56 @@ function renderTripSettings() {
     S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit') });
   };
   if (cloud) {
-    $('#share-btn').onclick = async () => {
-      const data = { title: S.meta.name || 'Our trip', text: `Our trip plan: ${S.meta.name || ''}`.trim(), url: shareLink() };
-      if (navigator.share) { try { await navigator.share(data); } catch { /* cancelled */ } } else copy(shareLink());
+    let code = '';
+    const linkFor = (kind) => (kind === 'admin' ? adminLink(code) : viewLink());
+    $('#share-card').addEventListener('click', async (e) => {
+      const sh = e.target.closest('[data-share-link]');
+      const cp = e.target.closest('[data-copy-link]');
+      if (sh) {
+        const kind = sh.dataset.shareLink;
+        const data = {
+          title: S.meta.name || 'Our trip',
+          text: kind === 'admin' ? `Admin link to edit our trip plan: ${S.meta.name || ''}` : `Our trip plan: ${S.meta.name || ''}`,
+          url: linkFor(kind),
+        };
+        if (navigator.share) { try { await navigator.share(data); } catch { /* cancelled */ } } else copy(data.url, kind);
+      } else if (cp) copy(linkFor(cp.dataset.copyLink), cp.dataset.copyLink);
+    });
+    const showAdmin = async (reset) => {
+      const box = $('#admin-box');
+      box.innerHTML = '<p class="muted small" role="status">Loading…</p>';
+      try {
+        const b = store.backendFor('cloud');
+        code = reset ? await b.resetAdminCode(S.trip.id) : await b.adminCode(S.trip.id);
+        box.innerHTML = `<div class="sharebox"><input id="admin-link" readonly value="${esc(adminLink(code))}" aria-label="Admin link"></div>
+          <div class="row"><button type="button" class="btn" data-share-link="admin">Share admin link</button><button type="button" class="btn ghost" data-copy-link="admin">Copy</button>
+          <button type="button" class="btn ghost danger" id="reset-admin">Make a new admin link</button></div>`;
+        $('#reset-admin').onclick = () => {
+          if (confirm('Make a new admin link? The current admin link will stop working. Phones that are already admins stay admins.')) showAdmin(true);
+        };
+        if (reset) toast('New admin link made. The old one no longer works.');
+      } catch (err) {
+        box.innerHTML = `<p class="error small">Couldn't load the admin link: ${esc(err.message)}. Are you online?</p><button type="button" class="btn ghost" id="show-admin">Try again</button>`;
+        $('#show-admin').onclick = () => showAdmin(false);
+      }
     };
-    $('#copy-btn').onclick = () => copy(shareLink());
+    const sa = $('#show-admin');
+    if (sa) sa.onclick = () => showAdmin(false);
+    $('#forget-trip').onclick = () => {
+      if (!confirm(`Remove "${S.meta.name}" from this device? ${admin ? 'It stays shared for everyone else. You can open it again with your link.' : 'You can add it again with the view link.'}`)) return;
+      const { id } = S.trip;
+      if (S.close) S.close();
+      store.forgetTrip(id);
+      S.trip = null;
+      store.setSettings({ currentTrip: '' });
+      go('#/trips');
+      toast('Trip removed from this device');
+    };
+  }
+  if (!admin) {
+    $('#ics').onclick = () => download(`${slug(S.meta.name)}.ics`, 'text/calendar', toICS(S.meta.name || 'Trip', S.items, bufferPct(), `${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}Z`));
+    $('#backup').onclick = () => download(`${slug(S.meta.name)}-backup.json`, 'application/json', JSON.stringify({ app: 'trip-planner', version: 1, meta: S.meta, items: S.items }, null, 2));
+    return;
   }
   const mv = $('#move-cloud');
   if (mv) mv.onclick = async () => {
@@ -722,9 +793,9 @@ function download(name, type, text) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-async function copy(text) {
-  try { await navigator.clipboard.writeText(text); toast('Link copied'); } catch {
-    const el = $('#share-link'); el?.select(); toast('Select the link and copy it');
+async function copy(text, kind = 'view') {
+  try { await navigator.clipboard.writeText(text); toast(kind === 'admin' ? 'Admin link copied' : 'Link copied'); } catch {
+    const el = $(kind === 'admin' ? '#admin-link' : '#view-link'); el?.select(); toast('Select the link and copy it');
   }
 }
 
@@ -752,7 +823,7 @@ function renderTrips() {
     ${configured ? `<section class="card">
       <h2>Join a shared trip</h2>
       <form id="join" class="form">
-        <label>Paste the link someone sent you<input name="link" required placeholder="https://…#/join/…" autocomplete="off"></label>
+        <label>Paste the link someone sent you (view or admin link)<input name="link" required placeholder="https://…#/join/…" autocomplete="off"></label>
         <button class="btn ghost">Join</button>
       </form></section>` : ''}`;
   $('#new-trip').onsubmit = (e) => {
@@ -766,9 +837,10 @@ function renderTrips() {
   if (j) j.onsubmit = (e) => {
     e.preventDefault();
     const v = new FormData(e.target).get('link').trim();
-    const id = (v.match(/join\/([0-9A-Za-z]{20,40})/) || [])[1] || (isTripId(v) ? v : '');
+    const m = v.match(/join\/([0-9A-Za-z]{20,40})(?:\/([0-9A-Za-z]{20,40}))?/);
+    const id = m?.[1] || (isTripId(v) ? v : '');
     if (!id) { toast('That doesn\'t look like a trip link'); return; }
-    joinTrip(id);
+    joinTrip(id, m?.[2] || '');
   };
 }
 
@@ -872,10 +944,13 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
   // Pre-filled (scanned) bookings keep only what was read; blank forms get sensible default times.
   const base = Object.keys(prefill).length ? {} : defaultTimes(type);
   const draft = existing ? JSON.parse(JSON.stringify(existing)) : { type, id: uid(16), ...base, ...prefill };
+  const ro = !canEdit();
   const fieldHtml = def.fields.map((f) => {
     const v = draft[f.key] ?? '';
-    const req = f.required ? ' required' : '';
-    const lbl = `<span>${esc(f.label)}${f.required ? ' <span class="req" aria-hidden="true">*</span>' : ''}</span>`;
+    // View only: show just what's filled in.
+    if (ro && (f.kind === 'money' ? !hasCost(draft) : f.kind === 'place' ? !v?.name : !v)) return '';
+    const req = f.required && !ro ? ' required' : '';
+    const lbl = `<span>${esc(f.label)}${f.required && !ro ? ' <span class="req" aria-hidden="true">*</span>' : ''}</span>`;
     switch (f.kind) {
       case 'place': return `<div class="place-field" data-place="${f.key}"></div>`;
       case 'datetime': return `<label>${lbl}<input type="datetime-local" name="${f.key}" value="${esc(v)}"${req}></label>`;
@@ -894,20 +969,23 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
   const edited = existing?.updatedAt ? `<p class="muted small">Last edited${existing.updatedBy ? ` by ${esc(existing.updatedBy)}` : ''} ${esc(fmtDate(existing.updatedAt.slice(0, 10)))} ${esc(existing.updatedAt.slice(11, 16))} UTC</p>` : '';
 
   openSheet(`<form class="form" id="item-form" novalidate>
-    <div class="sheet-head"><h2><span aria-hidden="true">${def.icon}</span> ${existing ? 'Edit' : 'Add'} ${esc(def.label.toLowerCase())}</h2>
+    <div class="sheet-head"><h2><span aria-hidden="true">${def.icon}</span> ${esc(ro ? (existing ? itemTitle(existing) : def.label) : `${existing ? 'Edit' : 'Add'} ${def.label.toLowerCase()}`)}</h2>
       <button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    ${ro ? '<p class="muted small">👁 View only</p>' : ''}
+    <fieldset class="plain form" ${ro ? 'disabled' : ''}>
     ${fieldHtml}
     ${type === 'drive' ? '<div class="routebox" id="routebox" role="status" aria-live="polite"></div>' : ''}
+    </fieldset>
     <section class="docs" id="docs" aria-label="Documents"></section>
     <p class="error" id="form-err" role="alert" hidden></p>
     <div class="row sticky-actions">
-      ${existing ? '<button type="button" class="btn danger ghost" id="del-item">Delete</button>' : ''}
+      ${existing && !ro ? '<button type="button" class="btn danger ghost" id="del-item">Delete</button>' : ''}
       <span class="grow"></span>
-      <button type="button" class="btn ghost" data-close>Cancel</button>
-      <button class="btn" id="save-item">Save</button>
+      <button type="button" class="btn ghost" data-close>${ro ? 'Close' : 'Cancel'}</button>
+      ${ro ? '' : '<button class="btn" id="save-item">Save</button>'}
     </div>
     ${edited}
-  </form>`, `${existing ? 'Edit' : 'Add'} ${def.label}`);
+  </form>`, `${ro ? 'View' : existing ? 'Edit' : 'Add'} ${def.label}`);
 
   const form = $('#item-form');
   const readInputs = () => {
@@ -1029,7 +1107,7 @@ function openDriveCalc() {
     <div class="place-field" id="calc-to"></div>
     <label>Leave at (optional)<input type="datetime-local" id="calc-start" value="${esc(st.start)}"></label>
     <div class="routebox" id="calc-out" role="status" aria-live="polite"><p class="muted">Pick two places to see how long the drive takes.</p></div>
-    <div class="row"><span class="grow"></span><button type="button" class="btn" id="calc-save" disabled>Add this drive to the plan</button></div>
+    <div class="row"><span class="grow"></span><button type="button" class="btn" id="calc-save" disabled ${canEdit() ? '' : 'hidden'}>Add this drive to the plan</button></div>
   </div>`, 'Drive time calculator');
   let route = null, seq = 0;
   const run = async () => {
@@ -1229,7 +1307,7 @@ function renderDocList(ul, files, { onRemovePending } = {}) {
       <span class="doc-name"><strong>${esc(f.name)}</strong>
         <span class="muted small">${esc(fmtBytes(f.size))}${f.pending ? ' · uploads when you save' : ''}${f.addedBy ? ` · added by ${esc(f.addedBy)}` : ''}</span></span>
       ${f.pending ? '' : `<button type="button" class="btn small ghost" data-doc="view" aria-label="View ${esc(f.name)}">View</button>`}
-      <button type="button" class="iconbtn small" data-doc="del" aria-label="Remove ${esc(f.name)}">🗑</button>
+      ${canEdit() ? `<button type="button" class="iconbtn small" data-doc="del" aria-label="Remove ${esc(f.name)}">🗑</button>` : ''}
     </div>
     <div class="doc-view" hidden></div>
   </li>`).join('');
@@ -1281,7 +1359,7 @@ function renderDocText(view, f, blob) {
       <button type="button" class="btn small ghost" data-copy>Copy text</button></details>`;
     $('pre', box).textContent = f.text;
     $('[data-copy]', box).onclick = () => navigator.clipboard.writeText(f.text).then(() => toast('Text copied'), () => toast('Couldn\'t copy'));
-  } else if (canRead && S.settings.aiKey) {
+  } else if (canRead && S.settings.aiKey && canEdit()) {
     box.innerHTML = '<button type="button" class="btn small ghost" data-gettext>📝 Get the text from this document</button>';
     $('[data-gettext]', box).onclick = async (e) => {
       e.target.disabled = true;
@@ -1314,10 +1392,12 @@ function mountDocs(el, { itemId, pending }) {
     el.innerHTML = `<h3>Documents</h3>
       ${list.length ? '<ul class="doclist"></ul>' : '<p class="muted small">Attach tickets, booking confirmations or photos (PDF, images and more, up to 10 MB each).</p>'}
       <p class="muted small" data-busy role="status" hidden>Preparing…</p>
-      <label class="btn ghost small filebtn">📎 Add document<input type="file" multiple accept="${ACCEPT}" aria-label="Add document"></label>`;
+      ${canEdit() ? `<label class="btn ghost small filebtn">📎 Add document<input type="file" multiple accept="${ACCEPT}" aria-label="Add document"></label>` : ''}`;
     const ul = $('.doclist', el);
     if (ul) renderDocList(ul, list, { onRemovePending: (f) => { pending.splice(pending.findIndex((p) => p.id === f.id), 1); draw(); } });
-    $('input[type=file]', el).onchange = async (e) => {
+    const picker = $('input[type=file]', el);
+    if (!picker) return; // view only
+    picker.onchange = async (e) => {
       const picked = [...e.target.files];
       e.target.value = '';
       if (!picked.length) return;

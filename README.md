@@ -152,11 +152,25 @@ Without this, trips are saved only on the device you made them on. To share live
    This config is not a secret, so committing it is fine: access is controlled by the rules.
 7. Commit, push, and bump `VERSION` in `travel-planner/sw.js`.
 
-Now new trips are shared. In the app, go to **Trip → Share link** and send the link (Messages, WhatsApp, email). When someone opens it, the trip is added to their app. Trips you made before turning on sync have a **Move to shared sync** button.
+Now new trips are shared. Trips you made before turning on sync have a **Move to shared sync** button (Trip tab).
 
-**Documents** are stored in the same Firestore database (split into chunks under 1 MB), so you don't need Firebase Storage, which requires the paid plan on new projects. The free tier includes 1 GB of Firestore storage. If you set up sync before documents were added, paste the updated `firestore.rules` again.
+**Documents** are stored in the same Firestore database (split into chunks under 1 MB), so you don't need Firebase Storage, which requires the paid plan on new projects. The free tier includes 1 GB of Firestore storage. Whenever `firestore.rules` changes, paste it into the Firebase console again.
 
-**Who can see a trip:** anyone who has its link. The link contains a long random code that can't be guessed, and the rules stop anyone from listing trips. Treat it like a password, and only send it to people you want editing the plan. The free Firebase tier (50k reads / 20k writes per day) is far more than a family trip needs.
+### View link and admin link
+
+Each shared trip has two links, under **Trip → Share**:
+
+| Link | Send it to | They can |
+|---|---|---|
+| 👁 **View link** | Family and friends | See everything (plan, map, documents, budget), updated live. Can't change anything. |
+| ✏️ **Admin link** | The one or two people who manage the plan | Edit everything. Opening it makes that phone an admin of the trip. |
+
+- The phone that creates a trip is its first admin. Admins can see the admin link and **Make a new admin link**, which stops the old one working (phones that are already admins stay admins).
+- This is enforced by the database rules, not just hidden in the app: a view-only phone that tries to write is refused.
+- Admin rights belong to the *device* (each phone signs in anonymously and gets its own id). If you delete the app, clear Safari's website data or change phone, open your admin link again, so keep it somewhere safe (e.g. a locked note). On iPhone the home-screen app and Safari count as different devices: open admin links from inside the app (**Trips → Join a shared trip**, paste the link).
+- The links contain long random codes that can't be guessed, and nobody can list trips. But anyone with either link can see booking references and attached documents, so don't upload passport scans and only send links to people you trust.
+
+The free Firebase tier (50k reads / 20k writes per day) is far more than a family trip needs.
 
 ## Turn on scanning (optional)
 
@@ -173,4 +187,5 @@ On iPhone, the easiest way to scan an email is to copy its text (press and hold 
 
 - Times are stored exactly as you type them (the local time on your ticket), with no time-zone conversion, so a 09:30 departure from London and an 11:20 arrival in New York both show as printed.
 - Tests: `npm test` (includes `tests/unit/travel-planner.test.js`) and `npm run test:e2e:travel` (phone-sized browser test with the map and route services mocked).
+- Sharing tests (need Java and `npm install`): `npm run test:rules` checks `firestore.rules` in the Firestore emulator (viewers can't write, admin links, new admin links); `npm run test:e2e:cloud` runs several phones against the Auth + Firestore emulators with the real Firebase SDK.
 - Icons: `node scripts/make-travel-icons.cjs`. After changing files, bump `VERSION` in `travel-planner/sw.js`.
