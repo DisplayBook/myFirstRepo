@@ -269,3 +269,54 @@ test('budget: summary totals, paid, by type and day, missing rates', () => {
   assert.equal(b.rows.length, 3);
   assert.equal(budgetSummary([], {}).budget, null);
 });
+
+// ---------- scanning ----------
+import { normalizeBookings, normalizeDateTime, placesToLocate, EXTRACT_SCHEMA } from '../../travel-planner/js/ai.js';
+
+test('scan: the extraction schema is strict (every property required, no extras)', () => {
+  const check = (s, path) => {
+    if (s.type === 'object') {
+      assert.equal(s.additionalProperties, false, `${path} must forbid extra properties`);
+      assert.deepEqual([...s.required].sort(), Object.keys(s.properties).sort(), `${path} must require every property`);
+      for (const [k, v] of Object.entries(s.properties)) check(v, `${path}.${k}`);
+    } else if (s.type === 'array') check(s.items, `${path}[]`);
+  };
+  check(EXTRACT_SCHEMA, 'root');
+});
+
+test('scan: dates and times are normalised with sensible defaults', () => {
+  assert.equal(normalizeDateTime('2026-12-01T9:05'), '2026-12-01T09:05');
+  assert.equal(normalizeDateTime('2026-12-01 14:30'), '2026-12-01T14:30');
+  assert.equal(normalizeDateTime('2026-12-01', '15:00'), '2026-12-01T15:00');
+  assert.equal(normalizeDateTime('1 Dec'), '');
+});
+
+test('scan: model output becomes booking drafts', () => {
+  const blank = { title: '', provider: '', number: '', ref: '', seat: '', start: '', end: '', place: { name: '', search: '' }, from: { name: '', search: '' }, to: { name: '', search: '' }, cost: '', currency: '', paid: false, notes: '' };
+  const drafts = normalizeBookings([
+    { ...blank, type: 'flight', provider: 'British Airways', number: 'BA 117', ref: 'XK9P2L', start: '2026-12-01T08:25', end: '2026-12-01T11:20',
+      from: { name: 'Heathrow Airport (LHR)', search: 'Heathrow Airport, London, UK' }, to: { name: 'JFK Airport (JFK)', search: 'JFK Airport, New York' }, cost: '1,240.00', currency: 'gbp', paid: true },
+    { ...blank, type: 'hotel', title: 'Hotel Penn', start: '2026-12-01', place: { name: 'Hotel Penn', search: '401 7th Ave, New York' }, cost: '612.5' },
+    { ...blank, type: 'car', provider: 'Hertz', start: '2026-12-02T14:00', from: { name: 'Hertz JFK', search: 'x' }, to: { name: 'Hertz JFK', search: 'x' } },
+    { ...blank, type: 'spaceship' },
+    { ...blank, type: 'activity', title: 'Show', start: '2026-12-02T19:30', end: '2026-12-02T18:00' },
+  ], { currency: 'USD' });
+  assert.equal(drafts.length, 4, 'unknown types are dropped');
+  const [f, h, c, a] = drafts;
+  assert.deepEqual(f.from, { name: 'Heathrow Airport (LHR)', search: 'Heathrow Airport, London, UK' });
+  assert.equal(f.cost, 1240);
+  assert.equal(f.currency, 'GBP');
+  assert.equal(f.paid, true);
+  assert.equal(f.ref, 'XK9P2L');
+  assert.equal(f.title, undefined, 'empty strings are not kept');
+  assert.equal(h.start, '2026-12-01T15:00');
+  assert.equal(h.end, '2026-12-02T11:00', 'hotel without check-out gets one night');
+  assert.equal(h.currency, 'USD', 'missing currency falls back to the trip currency');
+  assert.equal(h.paid, false);
+  assert.equal(c.to, undefined, 'same drop-off as pick-up is left empty');
+  assert.equal(c.end, '2026-12-03T14:00');
+  assert.equal(a.end, undefined, 'an end before the start is dropped');
+  assert.deepEqual(placesToLocate(f), ['from', 'to']);
+  assert.deepEqual(placesToLocate({ place: { name: 'x', lat: 1, lon: 2 } }), []);
+  assert.deepEqual(normalizeBookings(null), []);
+});

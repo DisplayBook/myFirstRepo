@@ -314,6 +314,93 @@ async function main() {
       assert.match(await page.locator('.hint').textContent(), /30% buffer/);
     });
 
+    await check('scan a pasted email with Claude: review, add, attach, get text from a photo', async () => {
+      const calls = [];
+      const blank = { title: '', provider: '', number: '', ref: '', seat: '', start: '', end: '', place: { name: '', search: '' }, from: { name: '', search: '' }, to: { name: '', search: '' }, cost: '', currency: '', paid: false, notes: '' };
+      await context.route('https://api.anthropic.com/**', async (route) => {
+        const req = route.request();
+        const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'POST, OPTIONS' };
+        if (req.method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: cors }); return; }
+        const body = req.postDataJSON();
+        calls.push({ body, headers: await req.allHeaders() });
+        const text = body.output_config?.format
+          ? JSON.stringify({ text: '', bookings: [
+            { ...blank, type: 'flight', provider: 'British Airways', number: 'BA 178', ref: 'XK9P2L', start: '2026-12-05T19:00', end: '2026-12-06T07:05',
+              from: { name: 'JFK Airport (JFK)', search: 'JFK Airport, New York' }, to: { name: 'Heathrow Airport (LHR)', search: 'Heathrow Airport, London' }, cost: '480', currency: 'GBP', paid: true },
+            { ...blank, type: 'activity', title: 'Top of the Rock', place: { name: 'Top of the Rock', search: 'Rockefeller Plaza, New York' }, ref: 'TR-55' },
+          ] })
+          : 'SEAT MAP\nRow G seats 12-13';
+        await route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/json', 'request-id': 'req_test' }, json: {
+          id: 'msg_test', type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text }],
+          stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 10, output_tokens: 10 },
+        } });
+      });
+
+      // Without a key the scan button explains how to set it up.
+      await page.goto(`${BASE}#/today`);
+      await page.getByRole('button', { name: 'Add to the plan' }).click();
+      await page.getByRole('button', { name: /Scan a booking/ }).click();
+      await page.getByRole('link', { name: 'Set up scanning' }).click();
+      await page.getByRole('heading', { name: 'Scanning bookings' }).waitFor();
+      await page.getByLabel('API key').fill('not-a-key');
+      await page.getByRole('button', { name: 'Turn on scanning' }).click();
+      await page.getByText(/doesn't look like an Anthropic API key/).waitFor();
+      await page.getByLabel('API key').fill('sk-ant-api03-testkey0123456789');
+      await page.getByRole('button', { name: 'Turn on scanning' }).click();
+      await page.getByText(/Scanning is on for this device/).waitFor();
+
+      await page.getByRole('button', { name: 'Add to the plan' }).click();
+      await page.getByRole('button', { name: /Scan a booking/ }).click();
+      await page.getByLabel('Paste a confirmation email').fill('Your British Airways booking XK9P2L. BA178 New York JFK to London Heathrow 5 Dec 19:00. Top of the Rock tickets TR-55.');
+      await page.getByRole('button', { name: 'Read booking' }).click();
+      await page.getByRole('heading', { name: 'Found 2 bookings' }).waitFor();
+      await shot(page, '10-scan-results');
+
+      const c = calls[0];
+      assert.equal(c.body.model, 'claude-opus-5-5');
+      assert.equal(c.body.output_config.format.type, 'json_schema');
+      assert.equal(c.body.fallbacks, 'default');
+      assert.match(c.headers['anthropic-beta'] || '', /server-side-fallback-2026-07-01/);
+      assert.equal(c.headers.authorization, 'Bearer sk-ant-api03-testkey0123456789');
+      assert.equal(c.headers['anthropic-dangerous-direct-browser-access'], 'true');
+      assert.match(JSON.stringify(c.body.messages), /BA178 New York JFK/);
+      assert.match(JSON.stringify(c.body.messages), /New York/, 'trip context is included');
+
+      // The activity has no date: review it, set one, save.
+      await page.locator('.scan-list li', { hasText: 'Top of the Rock' }).getByText(/Missing starts — tap Review/).waitFor();
+      await page.locator('.scan-list li', { hasText: 'Top of the Rock' }).getByRole('button', { name: 'Review' }).click();
+      assert.equal(await page.getByLabel('What').inputValue(), 'Top of the Rock');
+      assert.equal(await page.getByLabel('Booking reference').inputValue(), 'TR-55');
+      await page.locator('#docs').getByText('Confirmation email.txt').waitFor();
+      await page.getByLabel('Starts').fill('2026-12-03T17:00');
+      await page.locator('#save-item').click();
+      // Back to the results; add the flight.
+      await page.locator('.scan-list li.done', { hasText: 'Top of the Rock' }).waitFor();
+      await page.getByRole('button', { name: 'Add booking' }).click();
+      await page.getByText('1 booking added').waitFor();
+      await page.locator('#sheet').waitFor({ state: 'hidden' });
+
+      await page.goto(`${BASE}#/plan`);
+      const fl = page.locator('.ev', { hasText: 'Fly JFK Airport (JFK) → Heathrow Airport (LHR)' }).first();
+      await fl.getByText('📎 1 document').waitFor();
+      await fl.getByText(/£480\.00 · paid/).waitFor();
+      await fl.getByText('Ref XK9P2L').waitFor();
+      await fl.click();
+      await page.getByRole('button', { name: 'View Confirmation email.txt' }).click();
+      await page.getByText('Text in this document').click();
+      await page.locator('.doc-text pre', { hasText: 'BA178' }).waitFor();
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+
+      // Get text from a photo already attached to a booking.
+      await page.getByRole('button', { name: /Broadway show/ }).first().click();
+      await page.getByRole('button', { name: 'View seat-map.png' }).click();
+      await page.getByRole('button', { name: /Get the text from this document/ }).click();
+      await page.locator('.doc-text pre', { hasText: 'Row G seats 12-13' }).waitFor();
+      assert.ok(!calls.at(-1).body.output_config.format, 'transcription asks for plain text');
+      await shot(page, '11-doc-text');
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+    });
+
     await check('layout fits a phone screen (no sideways scroll)', async () => {
       for (const h of ['#/today', '#/plan', '#/trip', '#/trips']) {
         await page.goto(BASE + h);

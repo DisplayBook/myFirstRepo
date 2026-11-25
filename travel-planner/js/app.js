@@ -10,6 +10,7 @@ import { searchPlaces, driveRoute, cachedRoute, currentPosition } from './geo.js
 import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount } from './budget.js';
+import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError } from './ai.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -607,6 +608,18 @@ function renderTripSettings() {
       <h2>Documents</h2>
       ${S.files.length ? `<div id="all-docs"></div>` : '<p class="muted">Tickets, booking confirmations and photos you attach to bookings appear here.</p>'}
     </section>
+    <section class="card" id="scan-settings">
+      <h2>Scanning bookings</h2>
+      <p>Scan a photo, screenshot, PDF or confirmation email and the app fills in the booking for you, and turns photos of documents into text. This uses Claude (by Anthropic) with your own API key.</p>
+      ${S.settings.aiKey ? `<p>✅ Scanning is on for this device (key ending …${esc(S.settings.aiKey.slice(-4))}).</p>
+        <button type="button" class="btn ghost danger" id="ai-off">Remove key from this device</button>`
+        : `<ol class="steps small">
+          <li>Sign in at <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> and add some credit (each scan costs a few cents).</li>
+          <li>Go to <strong>API keys → Create key</strong> and copy it.</li>
+          <li>Paste it here. It stays on this device only and is never shared with the trip.</li></ol>
+        <form id="ai-form" class="form"><label>API key<input name="key" type="password" autocomplete="off" placeholder="sk-ant-…" required></label>
+        <button class="btn">Turn on scanning</button></form>`}
+    </section>
     <section class="card">
       <h2>Export</h2>
       <div class="stack">
@@ -643,6 +656,17 @@ function renderTripSettings() {
     store.rememberTrip({ id: S.trip.id, name: patch.name, kind: S.trip.kind });
     toast('Trip saved');
   };
+  const aiForm = $('#ai-form');
+  if (aiForm) aiForm.onsubmit = (e) => {
+    e.preventDefault();
+    const key = new FormData(aiForm).get('key').trim();
+    if (!/^sk-ant-[\w-]{10,}$/.test(key)) { toast('That doesn\'t look like an Anthropic API key (it starts with sk-ant-)'); return; }
+    S.settings = store.setSettings({ aiKey: key });
+    toast('Scanning is on');
+    render();
+  };
+  const aiOff = $('#ai-off');
+  if (aiOff) aiOff.onclick = () => { S.settings = store.setSettings({ aiKey: '' }); toast('Key removed from this device'); render(); };
   $('#prefs').onchange = (e) => {
     const fd = new FormData(e.currentTarget);
     S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit') });
@@ -774,10 +798,12 @@ $('#fab').onclick = () => openAddChooser();
 
 function openAddChooser() {
   openSheet(`<div class="sheet-head"><h2>Add to the plan</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    <button type="button" class="scan-cta" data-scan><span aria-hidden="true">✨</span><span><strong>Scan a booking</strong><small>Photo, screenshot, PDF or pasted email — fills in the details for you</small></span></button>
     <div class="typegrid">${Object.entries(TYPES).map(([k, d]) => `<button type="button" data-type="${k}" style="--c:${d.color}"><span aria-hidden="true">${d.icon}</span>${esc(d.label)}</button>`).join('')}
     <button type="button" data-calc style="--c:${TYPES.drive.color}"><span aria-hidden="true">⏱️</span>Drive time calculator</button></div>`, 'Add to the plan');
   $$('[data-type]', sheetBody).forEach((b) => { b.onclick = () => openItemForm(b.dataset.type); });
   $('[data-calc]', sheetBody).onclick = () => openDriveCalc();
+  $('[data-scan]', sheetBody).onclick = () => openScan();
 }
 
 // Place picker: search (Nominatim), places already in the trip, or current location.
@@ -841,9 +867,11 @@ function defaultTimes(type) {
   }
 }
 
-function openItemForm(type, existing, prefill = {}) {
+function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], onSaved } = {}) {
   const def = TYPES[type];
-  const draft = existing ? JSON.parse(JSON.stringify(existing)) : { type, id: uid(16), ...defaultTimes(type), ...prefill };
+  // Pre-filled (scanned) bookings keep only what was read; blank forms get sensible default times.
+  const base = Object.keys(prefill).length ? {} : defaultTimes(type);
+  const draft = existing ? JSON.parse(JSON.stringify(existing)) : { type, id: uid(16), ...base, ...prefill };
   const fieldHtml = def.fields.map((f) => {
     const v = draft[f.key] ?? '';
     const req = f.required ? ' required' : '';
@@ -940,12 +968,13 @@ function openItemForm(type, existing, prefill = {}) {
     form.elements.start.addEventListener('change', () => {
       const st = form.elements.start.value, en = form.elements.end.value;
       if (st && en && prevStart) form.elements.end.value = addMinutes(en, diffMinutes(prevStart, st));
+      else if (st && en && en < st) form.elements.end.value = '';
       prevStart = st;
     });
   }
 
   // New bookings keep picked files until Save; existing ones upload straight away.
-  const pending = [];
+  const pending = prefillDocs.map((p) => ({ ...p, id: uid(8) }));
   const docs = mountDocs($('#docs'), { itemId: draft.id, pending: existing ? null : pending });
 
   if (type === 'drive') {
@@ -968,6 +997,8 @@ function openItemForm(type, existing, prefill = {}) {
     $('#save-item').disabled = true;
     try { await write((b, id) => b.saveItem(id, item)); } catch { $('#save-item').disabled = false; return; }
     for (const p of pending) uploadDoc(item.id, p);
+    // The scan flow continues in the same dialog, so it closes it itself.
+    if (onSaved) { onSaved(item); return; }
     closeSheet();
     toast(existing ? 'Saved' : `${def.label} added`);
     const d = datePart(item.start);
@@ -1035,6 +1066,136 @@ function openDriveCalc() {
   };
 }
 
+// ---------- scanning (Claude) ----------
+
+let lastScan = null; // {drafts, docs, added:Set} kept while the app is open
+
+function openScan() {
+  if (!S.settings.aiKey) {
+    openSheet(`<div class="sheet-head"><h2>✨ Scan a booking</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+      <p>Scanning reads photos, screenshots, PDFs and confirmation emails and fills in the booking for you. It uses Claude with your own Anthropic API key, which you add once on this device.</p>
+      <div class="row"><a class="btn" href="#/trip" data-close id="go-setup">Set up scanning</a></div>`, 'Scan a booking');
+    $('#go-setup').onclick = () => { closeSheet(); go('#/trip'); setTimeout(() => $('#scan-settings')?.scrollIntoView({ block: 'start' }), 50); };
+    return;
+  }
+  if (lastScan && lastScan.drafts.some((_, i) => !lastScan.added.has(i))) { showScanResults(); return; }
+  openSheet(`<div class="form">
+    <div class="sheet-head"><h2>✨ Scan a booking</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    <label class="btn filebtn scan-pick">📷 Take a photo or choose a screenshot / PDF<input type="file" id="scan-file" accept="image/*,application/pdf,.pdf,.txt,.eml,.html,.htm"></label>
+    <p class="center muted small">or</p>
+    <label>Paste a confirmation email<textarea id="scan-text" rows="6" placeholder="Paste the whole email here"></textarea></label>
+    <button type="button" class="btn" id="scan-go">Read booking</button>
+    <p class="muted small" id="scan-status" role="status" aria-live="polite"></p>
+    <p class="muted small">The document is sent to Anthropic's Claude to read it. Check the details before saving.</p>
+  </div>`, 'Scan a booking');
+  const run = async (input, doc) => {
+    const status = $('#scan-status');
+    const btn = $('#scan-go');
+    btn.disabled = true;
+    status.textContent = 'Reading… this usually takes 10–30 seconds.';
+    try {
+      const span = tripSpan(S.meta, S.items);
+      const res = await extractBookings(S.settings.aiKey, input, {
+        tripName: S.meta.name, start: span.start, end: span.end, today: localDate(), currency: homeCurrency(S.meta),
+      });
+      const drafts = normalizeBookings(res.bookings, { currency: homeCurrency(S.meta) });
+      if (doc && res.text) doc.text = res.text;
+      if (!drafts.length) {
+        status.textContent = res.text ? 'No bookings found in it. You can still attach it to a booking — its text has been read.' : 'No bookings found in it. Try a clearer photo, or paste the email text.';
+        btn.disabled = false;
+        return;
+      }
+      status.textContent = 'Finding places on the map…';
+      for (const d of drafts) {
+        for (const k of placesToLocate(d)) {
+          try {
+            const [hit] = await searchPlaces(d[k].search || d[k].name);
+            if (hit) d[k] = { name: d[k].name, lat: hit.lat, lon: hit.lon };
+          } catch { /* keep the name without a map location */ }
+          if (d[k]) delete d[k].search;
+        }
+      }
+      lastScan = { drafts, docs: doc ? [doc] : [], added: new Set() };
+      showScanResults();
+    } catch (err) {
+      status.textContent = friendlyError(err);
+      status.className = 'error small';
+      btn.disabled = false;
+    }
+  };
+  $('#scan-file').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    let doc;
+    try { doc = await prepareFile(file); } catch (err) { $('#scan-status').textContent = err.message; return; }
+    run({ blob: file }, doc);
+  };
+  $('#scan-go').onclick = () => {
+    const text = $('#scan-text').value.trim();
+    if (text.length < 20) { $('#scan-status').textContent = 'Take a photo, choose a file, or paste the email text first.'; return; }
+    const blob = new Blob([text], { type: 'text/plain' });
+    run({ text }, { blob, name: 'Confirmation email.txt', type: 'text/plain', size: blob.size, text });
+  };
+}
+
+function showScanResults() {
+  const { drafts, docs, added } = lastScan;
+  const left = drafts.map((d, i) => ({ d, i })).filter(({ i }) => !added.has(i));
+  const ready = left.filter(({ d }) => !validateItem(d).length);
+  openSheet(`<div class="form">
+    <div class="sheet-head"><h2>✨ Found ${drafts.length} booking${drafts.length === 1 ? '' : 's'}</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    <ul class="scan-list">${drafts.map((d, i) => {
+      const errs = validateItem(d);
+      const missingMap = placesToLocate(d).length;
+      return `<li class="${added.has(i) ? 'done' : ''}">
+        <span class="scan-icon" aria-hidden="true">${TYPES[d.type].icon}</span>
+        <span class="scan-body"><strong>${esc(itemTitle(d))}</strong>
+          <span class="muted small">${d.start ? esc(`${fmtDate(datePart(d.start))} ${t12(timePart(d.start))}`) : 'No date'}${d.ref ? ` · Ref ${esc(d.ref)}` : ''}${hasCost(d) ? ` · ${esc(fmtMoney(d.cost, d.currency))}` : ''}</span>
+          ${added.has(i) ? '<span class="ok small">✓ Added</span>' : errs.length ? `<span class="error small">Missing ${esc(errs.map((e) => e.replace(/ is required$/, '').toLowerCase()).join(', '))} — tap Review</span>` : missingMap ? '<span class="muted small">Some places aren\'t on the map yet</span>' : ''}</span>
+        ${added.has(i) ? '' : `<button type="button" class="btn small ghost" data-review="${i}">Review</button>`}
+      </li>`;
+    }).join('')}</ul>
+    ${docs.length ? `<p class="muted small">📎 ${esc(docs[0].name)} will be attached to each booking${docs[0].text && docs[0].type.startsWith('image/') ? ', with its text' : ''}.</p>` : ''}
+    <div class="row">
+      <button type="button" class="btn ghost" id="scan-new">Scan something else</button>
+      <span class="grow"></span>
+      ${ready.length ? `<button type="button" class="btn" id="scan-all">${ready.length === 1 ? 'Add booking' : ready.length === left.length ? `Add all ${ready.length}` : `Add the ${ready.length} ready`}</button>` : ''}
+    </div>
+  </div>`, 'Scanned bookings');
+  $$('[data-review]', sheetBody).forEach((b) => {
+    b.onclick = () => {
+      const i = +b.dataset.review;
+      openItemForm(drafts[i].type, null, drafts[i], {
+        docs,
+        onSaved: () => {
+          added.add(i);
+          toast('Booking added');
+          if (drafts.some((_, j) => !added.has(j))) showScanResults();
+          else { lastScan = null; closeSheet(); }
+        },
+      });
+    };
+  });
+  $('#scan-new').onclick = () => { lastScan = null; openScan(); };
+  const all = $('#scan-all');
+  if (all) all.onclick = async () => {
+    all.disabled = true;
+    for (const { d, i } of ready) {
+      const item = cleanItem({ ...d, id: uid(16), updatedAt: new Date().toISOString(), updatedBy: S.settings.name });
+      try { await write((b, id) => b.saveItem(id, item)); } catch { all.disabled = false; return; }
+      for (const doc of docs) uploadDoc(item.id, doc);
+      added.add(i);
+    }
+    const n = ready.length;
+    if (drafts.some((_, j) => !added.has(j))) showScanResults();
+    else { lastScan = null; closeSheet(); }
+    toast(`${n} booking${n === 1 ? '' : 's'} added`);
+    const first = ready[0]?.d.start;
+    if (first && parseRoute().name !== 'plan') go(`#/today/${datePart(first)}`);
+  };
+}
+
 // ---------- documents ----------
 
 const blobCache = new Map(); // fileId -> Blob, for this session
@@ -1053,7 +1214,7 @@ async function loadDoc(f) {
 
 function uploadDoc(itemId, p) {
   const meta = cleanItem({
-    id: uid(20), itemId, name: p.name, type: p.type, size: p.size,
+    id: uid(20), itemId, name: p.name, type: p.type, size: p.size, text: p.text ? String(p.text).slice(0, 50000) : '',
     addedBy: S.settings.name, addedAt: new Date().toISOString(),
   });
   blobCache.set(meta.id, p.blob);
@@ -1102,10 +1263,43 @@ function renderDocList(ul, files, { onRemovePending } = {}) {
         </div>`;
       const sh = $('[data-share]', view);
       if (sh) sh.onclick = () => navigator.share({ files: [file], title: f.name }).catch(() => {});
+      renderDocText(view, f, blob);
     } catch (err) {
       view.innerHTML = `<p class="error small">${esc(err.message)}</p>`;
     }
   };
+}
+
+/** The document's text (from scanning), or a button to get it. */
+function renderDocText(view, f, blob) {
+  const box = document.createElement('div');
+  box.className = 'doc-text';
+  view.append(box);
+  const canRead = /^image\/|application\/pdf/.test(f.type || '') || /\.pdf$/i.test(f.name);
+  if (f.text) {
+    box.innerHTML = `<details><summary>Text in this document</summary><pre></pre>
+      <button type="button" class="btn small ghost" data-copy>Copy text</button></details>`;
+    $('pre', box).textContent = f.text;
+    $('[data-copy]', box).onclick = () => navigator.clipboard.writeText(f.text).then(() => toast('Text copied'), () => toast('Couldn\'t copy'));
+  } else if (canRead && S.settings.aiKey) {
+    box.innerHTML = '<button type="button" class="btn small ghost" data-gettext>📝 Get the text from this document</button>';
+    $('[data-gettext]', box).onclick = async (e) => {
+      e.target.disabled = true;
+      e.target.textContent = 'Reading… (usually 10–30 seconds)';
+      try {
+        const text = (await transcribe(S.settings.aiKey, blob)).slice(0, 50000);
+        f.text = text;
+        await write((b, id) => b.updateFile(id, { id: f.id, text }));
+        box.remove();
+        renderDocText(view, f, blob);
+        $('details', view)?.setAttribute('open', '');
+      } catch (err) {
+        e.target.disabled = false;
+        e.target.textContent = '📝 Get the text from this document';
+        toast(friendlyError(err));
+      }
+    };
+  }
 }
 
 /** Documents section inside a booking form. */

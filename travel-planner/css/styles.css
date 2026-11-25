@@ -245,6 +245,28 @@ textarea { resize: vertical; }
 .rate { display: flex !important; align-items: center; gap: 8px; color: var(--text) !important; font-weight: 500 !important; }
 .rate input { width: 110px; }
 
+/* ---------- scanning ---------- */
+.scan-cta {
+  display: flex; align-items: center; gap: 12px; width: 100%; margin: 4px 0 6px; padding: 14px; border-radius: 14px; cursor: pointer; text-align: left;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--card)), var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  color: var(--text); font: inherit;
+}
+.scan-cta > span:first-child { font-size: 1.6rem; }
+.scan-cta span:last-child { display: grid; gap: 2px; }
+.scan-cta small { color: var(--muted); }
+.scan-pick { min-height: 56px; text-align: center; }
+.scan-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.scan-list li { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
+.scan-list li.done { opacity: .65; }
+.scan-icon { font-size: 1.4rem; }
+.scan-body { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.scan-body strong { overflow-wrap: anywhere; }
+.ok { color: var(--ok); }
+.steps { padding-left: 1.2em; margin: 6px 0 10px; display: grid; gap: 4px; }
+.doc-text details { border-top: 1px dashed var(--line); padding-top: 6px; }
+.doc-text summary { cursor: pointer; font-weight: 600; color: var(--accent); min-height: 36px; display: flex; align-items: center; }
+.doc-text pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .85rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border-radius: 8px; padding: 10px; max-height: 50vh; overflow: auto; margin: 6px 0; }
+
 /* ---------- plan ---------- */
 .plan-day { margin: 18px 0; }
 .plan-head { display: flex; justify-content: space-between; align-items: center; color: var(--text); text-decoration: none; font-weight: 700; padding: 6px 2px; min-height: 40px; border-bottom: 1px solid var(--line); }

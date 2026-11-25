@@ -29,7 +29,7 @@ const writeJSON = (k, v) => {
 
 // ---------- device-only preferences ----------
 
-export const DEFAULT_SETTINGS = { name: '', h12: false, unit: 'km', currentTrip: '' };
+export const DEFAULT_SETTINGS = { name: '', h12: false, unit: 'km', currentTrip: '', aiKey: '' };
 export function getSettings() { return { ...DEFAULT_SETTINGS, ...readJSON(SETTINGS, {}) }; }
 export function setSettings(patch) { const s = { ...getSettings(), ...patch }; writeJSON(SETTINGS, s); return s; }
 
@@ -107,6 +107,13 @@ const local = {
     const blob = await idbGet(meta.id);
     if (!blob) throw new Error('This document is missing from this device');
     return blob;
+  },
+  async updateFile(id, meta) {
+    const d = readJSON(tripKey(id), { meta: {}, items: {} });
+    if (!d.files?.[meta.id]) return;
+    d.files[meta.id] = { ...d.files[meta.id], ...meta };
+    if (!writeJSON(tripKey(id), d)) throw new Error('Could not save: device storage is full');
+    emitLocal(id);
   },
   async deleteFile(id, meta) {
     await idbDel(meta.id).catch(() => {});
@@ -203,6 +210,10 @@ const cloud = {
     const writes = chunks.map((c, i) => fs.setDoc(fs.doc(db, 'trips', id, 'files', meta.id, 'chunks', String(i)), { i, b: fs.Bytes.fromUint8Array(c) }));
     writes.push(fs.setDoc(fs.doc(db, 'trips', id, 'files', meta.id), { ...meta, chunks: chunks.length }));
     await Promise.all(writes);
+  },
+  async updateFile(id, meta) {
+    const { fs, db } = await loadCloud();
+    await fs.setDoc(fs.doc(db, 'trips', id, 'files', meta.id), meta, { merge: true });
   },
   async getFile(id, meta) {
     const { fs, db } = await loadCloud();

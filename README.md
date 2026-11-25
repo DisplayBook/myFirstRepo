@@ -124,6 +124,7 @@ A third, separate app: an installable web app (works in any browser and on iPhon
 - **Sharing:** with sync turned on (below), everyone with the trip link sees the same plan and can edit it. Changes appear within seconds, and it works offline (changes sync when you're back online). It shows who last edited each item.
 - **Documents:** attach tickets, booking confirmations, PDFs and photos to any booking (up to 10 MB each; large photos are shrunk automatically). Bookings with documents show a 📎 on the timeline, and **Trip → Documents** lists them all in one place. Tap **View** to preview, open, or **Share / Save to Files**. On shared trips everyone sees the documents, and the app downloads them in the background so they're there at the airport with no signal.
 - **Costs & Budget:** every booking has a cost (any currency) and an "Already paid" tick. The **Budget** tab shows planned spend against your total budget, paid vs still to pay, spend by category and by day (hotel and car hire costs are spread across their nights/days), and which bookings still have no cost. Set the trip's home currency and exchange rates there; costs in a currency without a rate are flagged rather than silently ignored.
+- **Scan bookings (AI):** tap **+ → Scan a booking**, then take a photo, pick a screenshot or PDF, or paste a confirmation email. Claude reads it, finds every booking in it (e.g. outbound and return flights), fills in times, places, booking refs and prices, and puts the places on the map. Review anything that's missing, then add them in one tap. The original is attached to each booking, and for photos the text is saved too. Any image or PDF document can also be turned into text later (**View → Get the text from this document**). See *Turn on scanning* below.
 - **Export:** add everything to your calendar (.ics), or download/import a JSON backup (plans only, not documents).
 
 URL once GitHub Pages is on: `https://<user>.github.io/<repo>/travel-planner/`. On iPhone: Safari → Share → **Add to Home Screen**.
@@ -156,6 +157,17 @@ Now new trips are shared. In the app, go to **Trip → Share link** and send the
 **Documents** are stored in the same Firestore database (split into chunks under 1 MB), so you don't need Firebase Storage, which requires the paid plan on new projects. The free tier includes 1 GB of Firestore storage. If you set up sync before documents were added, paste the updated `firestore.rules` again.
 
 **Who can see a trip:** anyone who has its link. The link contains a long random code that can't be guessed, and the rules stop anyone from listing trips. Treat it like a password, and only send it to people you want editing the plan. The free Firebase tier (50k reads / 20k writes per day) is far more than a family trip needs.
+
+## Turn on scanning (optional)
+
+Scanning uses Claude through the Anthropic API, paid per use. Each scan costs a few cents.
+
+1. Sign in at <https://console.anthropic.com>, add a little credit under **Billing**, then **API keys → Create key**.
+2. In the app: **Trip → Scanning bookings**, paste the key and tap **Turn on scanning**.
+
+The key is stored only on that device (it's never put into the shared trip), and the app sends it straight to Anthropic. Anyone else who wants to scan adds their own key, or you add yours on their phone. The scanned document is sent to Anthropic to be read. Check what was filled in before saving: times are kept as printed, and the model can misread a blurry photo.
+
+On iPhone, the easiest way to scan an email is to copy its text (press and hold → Select All → Copy) and paste it in, or take a screenshot of it.
 
 ## Notes
 
