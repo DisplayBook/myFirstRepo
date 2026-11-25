@@ -1,7 +1,7 @@
 // Trip Planner service worker: offline cache for the app shell. Bump VERSION after changing files.
 // Trip data is not handled here: shared trips are cached by Firestore itself,
 // device-only trips live in localStorage.
-const VERSION = 'trips-v1.3.0';
+const VERSION = 'trips-v1.3.1';
 const SHELL = [
   './',
   './index.html',
@@ -28,7 +28,11 @@ const TILES = 'trips-tiles';
 const TILE_LIMIT = 600;
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache (GitHub Pages lets it keep files
+  // for 10 minutes), so a new version never gets stored with old files mixed in.
+  event.waitUntil(caches.open(VERSION)
+    .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
@@ -63,9 +67,13 @@ self.addEventListener('fetch', (event) => {
   }
   if (url.origin !== self.location.origin) return;
 
-  // App files: network first (so updates show up), cache when offline.
+  // App files: network first, always checking with the server (not the 10-minute
+  // HTTP cache) so every file comes from the same version. Cache when offline.
+  const fresh = req.mode === 'navigate'
+    ? fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' })
+    : fetch(new Request(req, { cache: 'no-cache' }));
   event.respondWith(
-    fetch(req).then((res) => {
+    fresh.then((res) => {
       if (res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
       return res;
     }).catch(() => caches.open(VERSION).then((c) => c.match(req, { ignoreSearch: true })).then((r) => r || caches.match('./index.html'))),

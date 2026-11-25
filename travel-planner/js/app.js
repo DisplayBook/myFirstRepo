@@ -1349,7 +1349,17 @@ function start() {
 }
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:' && !navigator.webdriver) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // Check for a new version on every launch, bypassing the HTTP cache.
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => reg.update()).catch(() => {});
+  // When a new version takes over, reload once so the page and its code match.
+  if (navigator.serviceWorker.controller) {
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloaded || sheet.open) return;
+      reloaded = true;
+      location.reload();
+    });
+  }
 }
 // Refresh "Next up" and today's date while the app stays open.
 setInterval(() => { if (!sheet.open && (parseRoute().name || 'today') === 'today' && S.trip) render({ fromData: true }); }, 60000);
