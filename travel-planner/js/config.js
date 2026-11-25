@@ -1,16 +1,15 @@
-// Shared sync settings.
+// Shared sync settings (Firebase project "my-travel-planner-57cef").
 //
-// Leave as null to keep trips on this device only.
-// To share trips live with other people, create a free Firebase project and
-// paste its web app config here (see "Turn on sharing" in the README).
-// This config is not a secret: access is controlled by firestore.rules.
-//
-// Example:
-// export const firebaseConfig = {
-//   apiKey: 'AIza...',
-//   authDomain: 'my-trips-1234.firebaseapp.com',
-//   projectId: 'my-trips-1234',
-//   appId: '1:1234567890:web:abc123',
-// };
+// This config is not a secret: it only says which Firebase project the app
+// talks to. Who can read and change trips is controlled by firestore.rules,
+// which must be published in the Firebase console (Firestore → Rules).
+// Set this back to null to keep trips on each device only.
 
-export const firebaseConfig = null;
+export const firebaseConfig = {
+  apiKey: 'AIzaSyD7PAeOqFAAbRburPk03HOabYyPoHkdioU',
+  authDomain: 'my-travel-planner-57cef.firebaseapp.com',
+  projectId: 'my-travel-planner-57cef',
+  storageBucket: 'my-travel-planner-57cef.firebasestorage.app',
+  messagingSenderId: '1045650920939',
+  appId: '1:1045650920939:web:e28677a28672473abc35ae',
+};
