@@ -2,42 +2,91 @@ rules_version = '2';
 
 // Trip Planner security rules. Paste into Firebase console → Firestore → Rules.
 //
-// Model: a trip id is a long random code (in the share link). Anyone using the
-// app who knows the code can read and edit that trip; nobody can list trips or
-// discover codes. Treat the share link like a password.
+// Access model
+// - A trip id is a long random code. The VIEW link contains only the trip id:
+//   anyone using the app who has it can read the trip. Nobody can list trips.
+// - Editing is limited to ADMIN devices. Each device signs in anonymously and
+//   has its own uid; trips/{tripId}/admins/{uid} marks a device as an admin.
+// - The device that creates a trip is its owner and first admin.
+// - The ADMIN link adds a secret invite code (trips/{tripId}/invites/{code},
+//   readable only by admins). A device that knows a valid code can add itself
+//   as an admin. Admins can replace the code, which cancels the old admin link.
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
     function validTripId(id) { return id.matches('^[0-9A-Za-z]{20,40}$'); }
+    function tripPath(tripId) { return /databases/$(database)/documents/trips/$(tripId); }
+    function isAdmin(tripId) {
+      return signedIn() && exists(/databases/$(database)/documents/trips/$(tripId)/admins/$(request.auth.uid));
+    }
+    function canRead(tripId) { return signedIn() && validTripId(tripId); }
 
     match /trips/{tripId} {
-      allow get, delete: if signedIn() && validTripId(tripId);
-      allow create, update: if signedIn() && validTripId(tripId) && request.resource.data.size() < 30;
+      allow get: if canRead(tripId);
       allow list: if false;
+      // The creator must name themselves as owner and add their own admin entry
+      // in the same batch.
+      allow create: if canRead(tripId)
+        && request.resource.data.owner == request.auth.uid
+        && request.resource.data.size() < 30
+        && existsAfter(/databases/$(database)/documents/trips/$(tripId)/admins/$(request.auth.uid));
+      allow update: if isAdmin(tripId)
+        && request.resource.data.owner == resource.data.owner
+        && request.resource.data.size() < 30;
+      allow delete: if isAdmin(tripId);
+
+      match /admins/{uid} {
+        // A device can check whether it is an admin; admins can see the list.
+        allow get: if signedIn() && (request.auth.uid == uid || isAdmin(tripId));
+        allow list: if isAdmin(tripId);
+        // Join as an admin: only for yourself, and only as the owner or with a
+        // valid invite code.
+        allow create: if signedIn() && request.auth.uid == uid
+          && request.resource.data.keys().hasOnly(['at', 'code', 'name'])
+          && (getAfter(tripPath(tripId)).data.owner == uid
+              || ('code' in request.resource.data
+                  && request.resource.data.code is string
+                  && request.resource.data.code.size() >= 20
+                  && exists(/databases/$(database)/documents/trips/$(tripId)/invites/$(request.resource.data.code))));
+        allow update: if false;
+        allow delete: if isAdmin(tripId);
+      }
+
+      match /invites/{code} {
+        allow read: if isAdmin(tripId);
+        // existsAfter: the first code is created in the same batch as the trip.
+        allow create: if signedIn()
+          && existsAfter(/databases/$(database)/documents/trips/$(tripId)/admins/$(request.auth.uid))
+          && code.size() >= 20 && request.resource.data.keys().hasOnly(['at']);
+        allow update: if false;
+        allow delete: if isAdmin(tripId);
+      }
 
       match /items/{itemId} {
-        allow read: if signedIn() && validTripId(tripId);
-        allow create, update: if signedIn() && validTripId(tripId)
+        allow read: if canRead(tripId);
+        allow create, update: if isAdmin(tripId)
           && itemId.size() <= 40
           && request.resource.data.size() < 40
           && request.resource.data.type in ['flight', 'hotel', 'car', 'drive', 'activity', 'transport'];
-        allow delete: if signedIn() && validTripId(tripId);
+        allow delete: if isAdmin(tripId);
       }
 
       // Attached documents: an entry per file, with the bytes split into chunks.
       match /files/{fileId} {
-        allow read, delete: if signedIn() && validTripId(tripId);
-        allow create, update: if signedIn() && validTripId(tripId)
+        allow read: if canRead(tripId);
+        allow create, update: if isAdmin(tripId)
           && fileId.size() <= 40
           && request.resource.data.size() < 20
           && request.resource.data['size'] is int
           && request.resource.data['size'] <= 10485760;
+        allow delete: if isAdmin(tripId);
 
         match /chunks/{chunkId} {
-          allow read, delete: if signedIn() && validTripId(tripId);
-          allow create, update: if signedIn() && validTripId(tripId)
+          allow read: if canRead(tripId);
+          allow create, update: if isAdmin(tripId)
             && request.resource.data.b is bytes
             && request.resource.data.b.size() <= 1000000;
+          allow delete: if isAdmin(tripId);
         }
       }
     }
