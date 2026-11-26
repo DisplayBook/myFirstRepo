@@ -23,7 +23,10 @@
 <body>
   <header class="topbar">
     <a href="#/trips" class="trip-switch" aria-label="Switch trip"><span id="trip-name">Trip Planner</span><span aria-hidden="true"> ▾</span></a>
-    <span id="sync" class="sync" role="status" hidden></span>
+    <span class="topbar-right">
+      <span id="sync" class="sync" role="status" hidden></span>
+      <button type="button" id="chat-btn" class="iconbtn chat-btn" aria-label="Ask about this trip" hidden>💬</button>
+    </span>
   </header>
 
   <main id="main" tabindex="-1"></main>

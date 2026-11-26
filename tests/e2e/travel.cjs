@@ -346,6 +346,21 @@ async function main() {
         const msg = (content, stop) => route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/json', 'request-id': 'req_test' }, json: {
           id: `msg_${calls.length}`, type: 'message', role: 'assistant', model: body.model, content, stop_reason: stop, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 10 },
         } });
+        if (body.stream) {
+          // Trip chat: stream the answer as server-sent events, like the real API.
+          const n = calls.filter((c) => c.body.stream).length;
+          const answer = n === 1 ? 'Your hotel booking reference is **HP-778**.\n\n- Check-in from 15:00' : 'It should be sunny.';
+          const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+          const sse = ev('message_start', { message: { id: `msg_${n}`, type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } })
+            + ev('content_block_start', { index: 0, content_block: { type: 'text', text: '', citations: [] } })
+            + answer.match(/.{1,12}/gs).map((t) => ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: t } })).join('')
+            + (n === 2 ? ev('content_block_delta', { index: 0, delta: { type: 'citations_delta', citation: { type: 'web_search_result_location', url: 'https://weather.example/nyc', title: 'NYC weather', cited_text: 'sunny', encrypted_index: 'x' } } }) : '')
+            + ev('content_block_stop', { index: 0 })
+            + ev('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 20 } })
+            + ev('message_stop', {});
+          await route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'text/event-stream', 'request-id': 'req_chat' }, body: sse });
+          return;
+        }
         const report = body.tools?.find((t) => t.name?.startsWith('report_'))?.name;
         if (report) {
           const search = [
@@ -489,6 +504,39 @@ async function main() {
       await page.getByText('A relaxed day: MoMA in the morning').waitFor();
       await page.goto(`${BASE}#/today/2026-12-01`);
       await page.getByText('🟠 Delayed 45 min · departs 09:10').waitFor();
+    });
+
+    await check('trip chat: answers from the trip data, keeps history, shows sources', async () => {
+      await page.goto(`${BASE}#/plan`);
+      await page.getByRole('button', { name: 'Ask about this trip' }).click();
+      await page.getByRole('heading', { name: '💬 Ask about this trip' }).waitFor();
+      await page.locator('#chat-starters').getByRole('button', { name: 'What\'s our hotel booking reference?' }).click();
+      await page.locator('.msg.bot strong', { hasText: 'HP-778' }).waitFor();
+      await page.locator('.msg.bot li', { hasText: 'Check-in from 15:00' }).waitFor();
+      const first = calls.filter((c) => c.body.stream)[0].body;
+      assert.equal(first.model, 'claude-opus-5-5');
+      assert.ok(first.tools.some((t) => t.type === 'web_search_20260209'));
+      const sys = JSON.stringify(first.system);
+      assert.match(sys, /booking ref HP-778/, 'trip data is sent');
+      assert.match(sys, /ephemeral/, 'trip data is cached');
+      assert.equal(first.messages.length, 1);
+      await shot(page, '14-chat');
+      // A follow-up sends the earlier turns too.
+      await page.getByLabel('Your question').fill('What will the weather be like?');
+      await page.getByLabel('Your question').press('Enter');
+      await page.locator('.msg.bot', { hasText: 'It should be sunny.' }).waitFor();
+      await page.locator('.sources a', { hasText: 'NYC weather' }).waitFor();
+      const second = calls.filter((c) => c.body.stream)[1].body;
+      assert.equal(second.messages.length, 3);
+      assert.match(second.messages[1].content, /HP-778/);
+      // The conversation is kept; New chat clears it.
+      await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
+      await page.getByRole('button', { name: 'Ask about this trip' }).click();
+      assert.equal(await page.locator('.msg').count(), 4);
+      await page.getByRole('button', { name: 'New chat' }).click();
+      assert.equal(await page.locator('.msg').count(), 0);
+      await page.locator('#chat-starters .chip').first().waitFor();
+      await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
     });
 
     await check('layout fits a phone screen (no sideways scroll)', async () => {

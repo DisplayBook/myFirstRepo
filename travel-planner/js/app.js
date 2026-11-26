@@ -10,7 +10,8 @@ import { searchPlaces, driveRoute, cachedRoute, currentPosition, routeRoads } fr
 import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount, payment } from './budget.js';
-import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime } from './ai.js';
+import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime, askTrip } from './ai.js';
+import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText } from './chat.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -178,6 +179,7 @@ function render({ fromData = false } = {}) {
   if (fromData && name === 'map' && sheet.open) return;
   $$('.tabbar a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.tab === name));
   $('#fab').hidden = name === 'trips' || !S.trip || !canEdit();
+  $('#chat-btn').hidden = name === 'trips' || !S.trip;
   document.body.dataset.view = name;
   if (name !== 'map') destroyMap();
   const keepScroll = fromData ? window.scrollY : 0;
@@ -1092,7 +1094,7 @@ function closeSheet() { if (sheet.open) sheet.close(); }
 sheet.addEventListener('click', (e) => {
   if (e.target === sheet || e.target.closest('[data-close]')) closeSheet();
 });
-sheet.addEventListener('close', () => { sheetBody.innerHTML = ''; S.onFiles = null; });
+sheet.addEventListener('close', () => { sheetBody.innerHTML = ''; S.onFiles = null; chatAbort?.abort(); chatAbort = null; });
 
 $('#fab').onclick = () => openAddChooser();
 
@@ -1550,6 +1552,117 @@ function showScanResults() {
     if (first && parseRoute().name !== 'plan') go(`#/today/${datePart(first)}`);
   };
 }
+
+// ---------- trip chat ----------
+
+let chatAbort = null;
+const chatKey = () => `tp:chat:${S.trip?.id}`;
+function chatLoad() { try { return JSON.parse(localStorage.getItem(chatKey())) || []; } catch { return []; } }
+function chatSave(msgs) { try { localStorage.setItem(chatKey(), JSON.stringify(msgs.slice(-40))); } catch { /* full */ } }
+
+const CHAT_STARTERS = [
+  'What\'s on today?',
+  'What time do we need to leave for the airport?',
+  'How much have we paid so far, and what\'s still due?',
+  'What\'s our hotel booking reference?',
+  'Where could we eat near tomorrow\'s plans?',
+];
+
+/** Short notes from the latest live checks, so the chat can mention them. */
+function liveNotes() {
+  const notes = {};
+  for (const it of S.items) {
+    const kind = it.type === 'flight' ? 'flight' : it.type === 'drive' ? 'road' : '';
+    const c = kind && liveGet(liveKey(kind, it));
+    if (!c) continue;
+    const d = c.data;
+    notes[it.id] = kind === 'flight'
+      ? `${d.found ? `${d.status}${d.delayMinutes ? `, ${d.delayMinutes} min late` : ''}${d.depEstimated ? `, departs ${d.depEstimated}` : ''}${d.depGate ? `, gate ${d.depGate}` : ''}` : 'no status found'} (checked ${ago(c.at)})`
+      : `${d.level}: ${d.summary} (checked ${ago(c.at)})`;
+  }
+  return notes;
+}
+
+function chatBubble(m) {
+  if (m.role === 'user') return `<li class="msg me"><div class="bubble">${esc(m.text)}</div></li>`;
+  return `<li class="msg bot"><div class="bubble">${m.error ? `<p class="error">${esc(m.text)}</p>` : renderMarkdown(m.text)}
+    ${(m.sources || []).length ? `<div class="sources"><span class="muted small">Sources:</span> ${m.sources.map((x) => `<a class="small" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>`).join(' · ')}</div>` : ''}</div></li>`;
+}
+
+function openChat() {
+  if (!S.trip) return;
+  if (!S.settings.aiKey) {
+    openSheet(`<div class="sheet-head"><h2>💬 Ask about this trip</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+      <p>Ask anything about your trip: times, booking references, what's still to pay, where to eat near your plans. It uses Claude with your own Anthropic API key, which you add once on this phone.</p>
+      <div class="row"><a class="btn" href="#/trip" id="go-setup-chat">Set up AI features</a></div>`, 'Ask about this trip');
+    $('#go-setup-chat').onclick = () => { setTimeout(() => $('#scan-settings')?.scrollIntoView({ block: 'start' }), 80); };
+    return;
+  }
+  openSheet(`<div class="chat">
+    <div class="sheet-head"><h2>💬 Ask about this trip</h2>
+      <span class="row"><button type="button" class="link small" id="chat-new">New chat</button>
+      <button type="button" class="iconbtn" data-close aria-label="Close">✕</button></span></div>
+    <ol class="chat-log" id="chat-log" aria-live="polite"></ol>
+    <div class="chat-starters" id="chat-starters"></div>
+    <form class="chat-input" id="chat-form">
+      <textarea id="chat-q" rows="1" enterkeyhint="send" placeholder="Ask about your trip…" aria-label="Your question"></textarea>
+      <button class="btn" id="chat-send" aria-label="Send">Send</button>
+    </form>
+    <p class="muted small chat-note">Answers use your trip details and the web, and can be wrong. Check anything important.</p>
+  </div>`, 'Ask about this trip');
+  const log = $('#chat-log');
+  const q = $('#chat-q');
+  const draw = () => {
+    const msgs = chatLoad();
+    log.innerHTML = msgs.map(chatBubble).join('');
+    $('#chat-starters').innerHTML = msgs.length ? '' : CHAT_STARTERS.map((t) => `<button type="button" class="chip" data-q="${esc(t)}">${esc(t)}</button>`).join('');
+    log.scrollTop = log.scrollHeight;
+  };
+  draw();
+  $('#chat-new').onclick = () => { chatAbort?.abort(); chatSave([]); draw(); q.focus(); };
+  $('#chat-starters').onclick = (e) => { const b = e.target.closest('[data-q]'); if (b) send(b.dataset.q); };
+  q.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#chat-form').requestSubmit(); } });
+  q.addEventListener('input', () => { q.style.height = 'auto'; q.style.height = `${Math.min(q.scrollHeight, 140)}px`; });
+  $('#chat-form').onsubmit = (e) => { e.preventDefault(); send(q.value); };
+
+  async function send(text) {
+    text = String(text || '').trim();
+    if (!text || chatAbort) return;
+    const tripId = S.trip.id;
+    const before = chatLoad();
+    const msgs = [...before, { role: 'user', text, at: Date.now() }];
+    chatSave(msgs);
+    q.value = ''; q.style.height = '';
+    draw();
+    const li = document.createElement('li');
+    li.className = 'msg bot';
+    li.innerHTML = '<div class="bubble"><p class="muted typing">Thinking…</p></div>';
+    log.append(li);
+    log.scrollTop = log.scrollHeight;
+    $('#chat-send').disabled = true;
+    chatAbort = new AbortController();
+    try {
+      const content = await askTrip(S.settings.aiKey, {
+        system: CHAT_SYSTEM,
+        context: buildTripContext({ meta: S.meta, items: S.items, files: S.files, now: localDateTime(), live: liveNotes() }),
+        history: before.filter((m) => !m.error).slice(-20).map((m) => ({ role: m.role, text: m.text })),
+        question: text,
+        signal: chatAbort.signal,
+        onText: (t) => { if (li.isConnected) { $('.bubble', li).innerHTML = renderMarkdown(t); log.scrollTop = log.scrollHeight; } },
+      });
+      if (S.trip?.id !== tripId) return;
+      chatSave([...msgs, { role: 'assistant', text: answerText(content) || 'Sorry, I don\'t have an answer for that.', sources: sourcesFrom(content), at: Date.now() }]);
+    } catch (err) {
+      if (err?.name === 'AbortError' || chatAbort?.signal.aborted) return;
+      if (S.trip?.id === tripId) chatSave([...msgs, { role: 'assistant', text: friendlyError(err), error: true, at: Date.now() }]);
+    } finally {
+      chatAbort = null;
+      if (log.isConnected) { $('#chat-send').disabled = false; draw(); }
+    }
+  }
+}
+
+$('#chat-btn').onclick = () => openChat();
 
 // ---------- documents ----------
 
