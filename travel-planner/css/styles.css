@@ -515,3 +515,4 @@ body[data-view="map"] .fab { bottom: calc(var(--tabbar-h) + env(safe-area-inset-
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
+.typegroup { margin: 14px 0 0; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }

@@ -1,6 +1,6 @@
 // Trip Planner: screens, forms and wiring.
 import {
-  TYPES, uid, isTripId, datePart, timePart, addDays, daysBetween, dateRange, localDate, localDateTime,
+  TYPES, TYPE_GROUPS, shapeOf, uid, isTripId, datePart, timePart, addDays, daysBetween, dateRange, localDate, localDateTime,
   fmtDate, fmtTime, fmtDuration, fmtDistance, fmtUntil, diffMinutes, addMinutes, hasCoords, shortName,
   haversineKm, greatCircle, decodePolyline, knownPlaces, itemTitle, driveMinutes, itemEnd, validateItem,
   cleanItem, eventsForItem, dayAgenda, tripSpan, defaultDay, driveLegs, legStatus, hotelForNight, toICS, formatFlightNo,
@@ -262,7 +262,10 @@ function eventMeta(ev) {
   if (it.ref && ['depart', 'checkin', 'pickup', 'activity'].includes(ev.kind)) bits.push(`Ref ${it.ref}`);
   if (it.terminal && ev.kind === 'depart') bits.push(`Terminal ${it.terminal}`);
   if (it.arrTerminal && ev.kind === 'arrive') bits.push(`Terminal ${it.arrTerminal}`);
-  if (it.seat && ev.kind === 'depart') bits.push(`Seats ${it.seat}`);
+  if (it.seat && (ev.kind === 'depart' || ev.kind === 'activity')) bits.push(`Seats ${it.seat}`);
+  if (['depart', 'checkin', 'pickup', 'activity'].includes(ev.kind)) {
+    for (const [k, label] of EXTRA_DETAILS) if (it[k]) bits.push(label(it[k]));
+  }
   if (hasCost(it) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind)) {
     const cur = it.currency || homeCurrency(S.meta);
     const pay = payment(it);
@@ -270,6 +273,14 @@ function eventMeta(ev) {
   }
   return bits;
 }
+
+/** Extra booking details shown on an expanded tile. */
+const EXTRA_DETAILS = [
+  ['platform', (v) => `Platform ${v}`], ['coach', (v) => `Coach ${v}`], ['deck', (v) => `Deck ${v}`],
+  ['cabin', (v) => `Cabin ${v}`], ['room', (v) => v], ['guests', (v) => `For ${v}`], ['doors', (v) => `Doors ${v}`],
+  ['spot', (v) => `Space ${v}`], ['vehicle', (v) => `🚗 ${v}`], ['attendees', (v) => `With ${v}`], ['guide', (v) => `Guide ${v}`],
+  ['phone', (v) => `☎ ${v}`], ['link', (v) => v], ['website', (v) => v],
+];
 
 /** Icon for a timeline event: flights show taking off 🛫 and landing 🛬. */
 function evIcon(ev) {
@@ -736,7 +747,8 @@ async function placeToPlan(x, { day, onSaved } = {}) {
     if (hit2) place = { name: `${x.name}, ${x.address || hit2.name}`.slice(0, 200), lat: hit2.lat, lon: hit2.lon };
   } catch { /* keep the name only */ }
   const d = day || S.viewDay || defaultDay(tripSpan(S.meta, S.items), localDate());
-  openItemForm('activity', null, { title: x.name, place, start: `${d}T${guessTime(x.when)}`, notes: x.why }, { onSaved });
+  const type = ['restaurant', 'cafe', 'bar'].includes(x.category) ? 'restaurant' : 'activity';
+  openItemForm(type, null, { title: x.name, place, start: `${d}T${guessTime(x.when)}`, notes: x.why }, { onSaved });
 }
 
 function ideasCard() {
@@ -981,7 +993,7 @@ async function renderMap(arg) {
     </div>
     <div id="map" class="map" role="region" aria-label="Trip map"></div>
     <div class="map-bottom">
-      <div class="legend">${['flight', 'drive', 'transport', 'hotel', 'activity', 'car'].map((k) => `<span><i style="--c:${TYPES[k].color}"></i>${esc(TYPES[k].label)}</span>`).join('')}<span><i class="dashed"></i>Drive between plans</span></div>
+      <div class="legend">${['flight', 'rail', 'drive', 'hotel', 'activity', 'car'].map((k) => `<span><i style="--c:${TYPES[k].color}"></i>${esc(TYPES[k].label)}</span>`).join('')}<span><i class="dashed"></i>Drive between plans</span></div>
       <button type="button" class="btn" id="open-calc">🚗 Drive time calculator</button>
     </div>`;
   $('#open-calc').onclick = () => openDriveCalc();
@@ -999,15 +1011,14 @@ async function renderMap(arg) {
   const lines = [];
   for (const it of items) {
     const when = (s) => (s ? `${fmtDate(datePart(s))} ${t12(timePart(s))}` : '');
-    switch (it.type) {
-      case 'flight':
-      case 'transport':
+    switch (shapeOf(it.type) === 'journey' ? 'journey' : it.type) {
+      case 'journey':
         addMarker(it.from, it, `${itemTitle(it)} · departs ${when(it.start)}`, it.type === 'flight' ? '🛫' : '');
         addMarker(it.to, it, `${itemTitle(it)} · arrives ${when(it.end) || '?'}`, it.type === 'flight' ? '🛬' : '');
         if (hasCoords(it.from) && hasCoords(it.to)) {
           lines.push(it.type === 'flight'
             ? { points: greatCircle(it.from, it.to), color: TYPES.flight.color, dash: '8 8', weight: 3 }
-            : { points: [[it.from.lat, it.from.lon], [it.to.lat, it.to.lon]], color: TYPES.transport.color, dash: '2 8', weight: 4 });
+            : { points: [[it.from.lat, it.from.lon], [it.to.lat, it.to.lon]], color: TYPES[it.type].color, dash: '2 8', weight: 4 });
         }
         break;
       case 'drive':
@@ -1540,8 +1551,9 @@ $('#fab').onclick = () => openAddChooser();
 function openAddChooser() {
   openSheet(`<div class="sheet-head"><h2>Add to the plan</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
     <button type="button" class="scan-cta" data-scan><span aria-hidden="true">✨</span><span><strong>Scan a booking</strong><small>Photo, screenshot, PDF or pasted email — fills in the details for you</small></span></button>
-    <div class="typegrid">${Object.entries(TYPES).map(([k, d]) => `<button type="button" data-type="${k}" style="--c:${d.color}"><span aria-hidden="true">${d.icon}</span>${esc(d.label)}</button>`).join('')}
-    <button type="button" data-calc style="--c:${TYPES.drive.color}"><span aria-hidden="true">⏱️</span>Drive time calculator</button></div>`, 'Add to the plan');
+    ${TYPE_GROUPS.map(([g, title]) => `<h3 class="typegroup">${esc(title)}</h3><div class="typegrid">${Object.entries(TYPES).filter(([, d]) => d.group === g)
+      .map(([k, d]) => `<button type="button" data-type="${k}" style="--c:${d.color}"><span aria-hidden="true">${d.icon}</span>${esc(d.label)}</button>`).join('')}
+    ${g === 'travel' ? `<button type="button" data-calc style="--c:${TYPES.drive.color}"><span aria-hidden="true">⏱️</span>Drive time calculator</button>` : ''}</div>`).join('')}`, 'Add to the plan');
   $$('[data-type]', sheetBody).forEach((b) => { b.onclick = () => openItemForm(b.dataset.type); });
   $('[data-calc]', sheetBody).onclick = () => openDriveCalc();
   $('[data-scan]', sheetBody).onclick = () => openScan();
@@ -1604,8 +1616,11 @@ function defaultTimes(type) {
   switch (type) {
     case 'hotel': return { start: `${d}T15:00`, end: `${addDays(d, 1)}T11:00` };
     case 'car': return { start: `${d}T10:00`, end: `${addDays(d, 1)}T10:00` };
-    case 'activity': return { start: `${d}T10:00`, end: `${d}T12:00` };
-    default: return { start: `${d}T09:00` };
+    case 'restaurant': return { start: `${d}T19:30` };
+    case 'parking': return { start: `${d}T08:00`, end: `${addDays(d, 1)}T18:00` };
+    case 'cruise': return { start: `${d}T16:00`, end: `${addDays(d, 7)}T08:00` };
+    case 'note': case 'map': return { start: `${d}T09:00` };
+    default: return shapeOf(type) === 'event' ? { start: `${d}T10:00`, end: `${d}T12:00` } : { start: `${d}T09:00` };
   }
 }
 

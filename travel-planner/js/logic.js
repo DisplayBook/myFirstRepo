@@ -5,10 +5,17 @@
 // ("2026-12-01T09:30"), with no time zone conversion. That is what travellers
 // read and type, and it keeps every viewer seeing the same thing.
 
-/** Item types, with the fields their form shows (in order). */
+/**
+ * Item types, with the fields their form shows (in order).
+ * shape: how it appears on the timeline —
+ *   journey: from → to, depart & arrive events (flights, trains, ferries…)
+ *   stay: check in / check out (place)      car: pick up / return
+ *   drive: a routed drive                   event: at a place, with optional end
+ * group: where it's listed in "Add to the plan".
+ */
 export const TYPES = {
   flight: {
-    label: 'Flight', plural: 'flights', icon: '✈️', color: '#2563eb',
+    label: 'Flight', plural: 'flights', icon: '✈️', color: '#2563eb', shape: 'journey', group: 'travel',
     fields: [
       { key: 'provider', label: 'Airline', kind: 'text', placeholder: 'e.g. British Airways' },
       { key: 'number', label: 'Flight number', kind: 'text', placeholder: 'e.g. BA 117' },
@@ -26,12 +33,15 @@ export const TYPES = {
     ],
   },
   hotel: {
-    label: 'Hotel', plural: 'hotels', icon: '🛏️', color: '#7c3aed',
+    label: 'Lodging', plural: 'hotels & lodging', icon: '🛏️', color: '#7c3aed', shape: 'stay', group: 'travel',
     fields: [
-      { key: 'title', label: 'Hotel name', kind: 'text', required: true },
+      { key: 'title', label: 'Hotel / apartment name', kind: 'text', required: true },
       { key: 'place', label: 'Address', kind: 'place' },
       { key: 'start', label: 'Check-in', kind: 'datetime', required: true },
       { key: 'end', label: 'Check-out', kind: 'datetime', required: true },
+      { key: 'room', label: 'Room type', kind: 'text' },
+      { key: 'guests', label: 'Guests', kind: 'text' },
+      { key: 'phone', label: 'Phone', kind: 'text' },
       { key: 'ref', label: 'Booking reference', kind: 'text' },
       { key: 'cost', label: 'Cost', kind: 'money' },
       { key: 'paid', label: 'Payment', kind: 'payment' },
@@ -39,13 +49,14 @@ export const TYPES = {
     ],
   },
   car: {
-    label: 'Car hire', plural: 'car hires', icon: '🚗', color: '#0f766e',
+    label: 'Car rental', plural: 'car rentals', icon: '🚗', color: '#0f766e', shape: 'car', group: 'travel',
     fields: [
       { key: 'provider', label: 'Company', kind: 'text', required: true, placeholder: 'e.g. Hertz' },
       { key: 'from', label: 'Pick-up location', kind: 'place' },
       { key: 'start', label: 'Pick-up time', kind: 'datetime', required: true },
       { key: 'to', label: 'Drop-off location (leave empty if same)', kind: 'place' },
       { key: 'end', label: 'Drop-off time', kind: 'datetime', required: true },
+      { key: 'vehicle', label: 'Car type', kind: 'text', placeholder: 'e.g. VW Golf or similar' },
       { key: 'ref', label: 'Booking reference', kind: 'text' },
       { key: 'cost', label: 'Cost', kind: 'money' },
       { key: 'paid', label: 'Payment', kind: 'payment' },
@@ -53,7 +64,7 @@ export const TYPES = {
     ],
   },
   drive: {
-    label: 'Drive', plural: 'drives', icon: '🛣️', color: '#d97706',
+    label: 'Directions / drive', plural: 'drives', icon: '🛣️', color: '#d97706', shape: 'drive', group: 'travel',
     fields: [
       { key: 'title', label: 'Name (optional)', kind: 'text', placeholder: 'e.g. Scenic route to Bath' },
       { key: 'from', label: 'From', kind: 'place', required: true },
@@ -66,9 +77,9 @@ export const TYPES = {
     ],
   },
   activity: {
-    label: 'Activity', plural: 'activities', icon: '📍', color: '#db2777',
+    label: 'Activity', plural: 'activities', icon: '📍', color: '#db2777', shape: 'event', group: 'plans',
     fields: [
-      { key: 'title', label: 'What', kind: 'text', required: true, placeholder: 'e.g. Museum tour, dinner' },
+      { key: 'title', label: 'What', kind: 'text', required: true, placeholder: 'e.g. Museum visit, ski school' },
       { key: 'place', label: 'Where', kind: 'place' },
       { key: 'start', label: 'Starts', kind: 'datetime', required: true },
       { key: 'end', label: 'Ends', kind: 'datetime' },
@@ -78,15 +89,181 @@ export const TYPES = {
       { key: 'notes', label: 'Notes', kind: 'textarea' },
     ],
   },
-  transport: {
-    label: 'Train / bus / ferry', plural: 'trains, buses & ferries', icon: '🚆', color: '#4d7c0f',
+  restaurant: {
+    label: 'Restaurant', plural: 'restaurants', icon: '🍽️', color: '#ea580c', shape: 'event', group: 'plans',
     fields: [
-      { key: 'title', label: 'Name', kind: 'text', required: true, placeholder: 'e.g. Eurostar to Paris' },
+      { key: 'title', label: 'Restaurant', kind: 'text', required: true, placeholder: 'e.g. Dishoom' },
+      { key: 'place', label: 'Address', kind: 'place' },
+      { key: 'start', label: 'Reservation time', kind: 'datetime', required: true },
+      { key: 'end', label: 'Ends', kind: 'datetime' },
+      { key: 'guests', label: 'Table for', kind: 'text', placeholder: 'e.g. 4' },
+      { key: 'phone', label: 'Phone', kind: 'text' },
+      { key: 'ref', label: 'Booking reference', kind: 'text' },
+      { key: 'cost', label: 'Cost', kind: 'money' },
+      { key: 'paid', label: 'Payment', kind: 'payment' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  tour: {
+    label: 'Tour', plural: 'tours', icon: '🚩', color: '#be123c', shape: 'event', group: 'plans',
+    fields: [
+      { key: 'title', label: 'Tour', kind: 'text', required: true, placeholder: 'e.g. Old Town walking tour' },
+      { key: 'place', label: 'Meeting point', kind: 'place' },
+      { key: 'start', label: 'Starts', kind: 'datetime', required: true },
+      { key: 'end', label: 'Ends', kind: 'datetime' },
+      { key: 'provider', label: 'Tour company', kind: 'text' },
+      { key: 'guide', label: 'Guide / contact', kind: 'text' },
+      { key: 'ref', label: 'Booking reference', kind: 'text' },
+      { key: 'cost', label: 'Cost', kind: 'money' },
+      { key: 'paid', label: 'Payment', kind: 'payment' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  concert: {
+    label: 'Concert', plural: 'concerts', icon: '🎵', color: '#9333ea', shape: 'event', group: 'plans',
+    fields: [
+      { key: 'title', label: 'Artist / event', kind: 'text', required: true, placeholder: 'e.g. Coldplay' },
+      { key: 'place', label: 'Venue', kind: 'place' },
+      { key: 'start', label: 'Starts', kind: 'datetime', required: true },
+      { key: 'end', label: 'Ends', kind: 'datetime' },
+      { key: 'seat', label: 'Seats', kind: 'text', placeholder: 'e.g. Block A, Row 12' },
+      { key: 'doors', label: 'Doors open', kind: 'text', placeholder: 'e.g. 18:30' },
+      { key: 'ref', label: 'Booking reference', kind: 'text' },
+      { key: 'cost', label: 'Cost', kind: 'money' },
+      { key: 'paid', label: 'Payment', kind: 'payment' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  theater: {
+    label: 'Theatre', plural: 'theatre shows', icon: '🎭', color: '#a21caf', shape: 'event', group: 'plans',
+    fields: [
+      { key: 'title', label: 'Show', kind: 'text', required: true, placeholder: 'e.g. Hamilton' },
+      { key: 'place', label: 'Theatre', kind: 'place' },
+      { key: 'start', label: 'Starts', kind: 'datetime', required: true },
+      { key: 'end', label: 'Ends', kind: 'datetime' },
+      { key: 'seat', label: 'Seats', kind: 'text', placeholder: 'e.g. Stalls K14–K16' },
+      { key: 'ref', label: 'Booking reference', kind: 'text' },
+      { key: 'cost', label: 'Cost', kind: 'money' },
+      { key: 'paid', label: 'Payment', kind: 'payment' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  meeting: {
+    label: 'Meeting', plural: 'meetings', icon: '💻', color: '#475569', shape: 'event', group: 'plans',
+    fields: [
+      { key: 'title', label: 'Meeting', kind: 'text', required: true, placeholder: 'e.g. Lunch with Anna' },
+      { key: 'place', label: 'Where', kind: 'place' },
+      { key: 'start', label: 'Starts', kind: 'datetime', required: true },
+      { key: 'end', label: 'Ends', kind: 'datetime' },
+      { key: 'attendees', label: 'With', kind: 'text' },
+      { key: 'link', label: 'Video link / phone', kind: 'text' },
+      { key: 'ref', label: 'Booking reference', kind: 'text' },
+      { key: 'cost', label: 'Cost', kind: 'money' },
+      { key: 'paid', label: 'Payment', kind: 'payment' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  parking: {
+    label: 'Parking', plural: 'parking', icon: '🅿️', color: '#0369a1', shape: 'event', group: 'travel',
+    fields: [
+      { key: 'title', label: 'Car park', kind: 'text', required: true, placeholder: 'e.g. Heathrow T5 Meet & Greet' },
+      { key: 'place', label: 'Address', kind: 'place' },
+      { key: 'start', label: 'Park from', kind: 'datetime', required: true },
+      { key: 'end', label: 'Collect by', kind: 'datetime' },
+      { key: 'spot', label: 'Space / level', kind: 'text' },
+      { key: 'vehicle', label: 'Car registration', kind: 'text' },
+      { key: 'ref', label: 'Booking reference', kind: 'text' },
+      { key: 'cost', label: 'Cost', kind: 'money' },
+      { key: 'paid', label: 'Payment', kind: 'payment' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  note: {
+    label: 'Note', plural: 'notes', icon: '📝', color: '#64748b', shape: 'event', group: 'other',
+    fields: [
+      { key: 'title', label: 'Title', kind: 'text', required: true, placeholder: 'e.g. Pick up keys from reception' },
+      { key: 'place', label: 'Place (optional)', kind: 'place' },
+      { key: 'start', label: 'Date & time', kind: 'datetime', required: true },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  map: {
+    label: 'Map / place', plural: 'saved places', icon: '🗺️', color: '#15803d', shape: 'event', group: 'other',
+    fields: [
+      { key: 'title', label: 'Name', kind: 'text', required: true, placeholder: 'e.g. Viewpoint, favourite bakery' },
+      { key: 'place', label: 'Location', kind: 'place', required: true },
+      { key: 'start', label: 'Date & time', kind: 'datetime', required: true },
+      { key: 'website', label: 'Website', kind: 'text' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  rail: {
+    label: 'Rail', plural: 'train journeys', icon: '🚆', color: '#4d7c0f', shape: 'journey', group: 'travel',
+    fields: [
+      { key: 'title', label: 'Name (optional)', kind: 'text', placeholder: 'e.g. Eurostar to Paris' },
+      { key: 'provider', label: 'Operator', kind: 'text' },
+      { key: 'number', label: 'Train number', kind: 'text' },
+      { key: 'from', label: 'From station', kind: 'place', required: true },
+      { key: 'to', label: 'To station', kind: 'place', required: true },
+      { key: 'start', label: 'Departs (local time)', kind: 'datetime', required: true },
+      { key: 'end', label: 'Arrives (local time)', kind: 'datetime' },
+      { key: 'coach', label: 'Coach / carriage', kind: 'text' },
+      { key: 'seat', label: 'Seats', kind: 'text' },
+      { key: 'platform', label: 'Platform', kind: 'text' },
+      { key: 'ref', label: 'Booking reference', kind: 'text' },
+      { key: 'cost', label: 'Cost', kind: 'money' },
+      { key: 'paid', label: 'Payment', kind: 'payment' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  ferry: {
+    label: 'Ferry', plural: 'ferries', icon: '⛴️', color: '#0e7490', shape: 'journey', group: 'travel',
+    fields: [
+      { key: 'title', label: 'Name (optional)', kind: 'text', placeholder: 'e.g. Dover to Calais' },
+      { key: 'provider', label: 'Operator', kind: 'text' },
+      { key: 'number', label: 'Sailing / ticket number', kind: 'text' },
+      { key: 'from', label: 'From port', kind: 'place', required: true },
+      { key: 'to', label: 'To port', kind: 'place', required: true },
+      { key: 'start', label: 'Departs (local time)', kind: 'datetime', required: true },
+      { key: 'end', label: 'Arrives (local time)', kind: 'datetime' },
+      { key: 'vehicle', label: 'Vehicle (if taking a car)', kind: 'text' },
+      { key: 'cabin', label: 'Cabin / seats', kind: 'text' },
+      { key: 'ref', label: 'Booking reference', kind: 'text' },
+      { key: 'cost', label: 'Cost', kind: 'money' },
+      { key: 'paid', label: 'Payment', kind: 'payment' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  cruise: {
+    label: 'Cruise', plural: 'cruises', icon: '🚢', color: '#1e40af', shape: 'journey', group: 'travel',
+    fields: [
+      { key: 'title', label: 'Name (optional)', kind: 'text', placeholder: 'e.g. Norwegian Fjords' },
+      { key: 'provider', label: 'Cruise line', kind: 'text' },
+      { key: 'number', label: 'Ship', kind: 'text' },
+      { key: 'from', label: 'Embark port', kind: 'place', required: true },
+      { key: 'to', label: 'Disembark port', kind: 'place', required: true },
+      { key: 'start', label: 'Departs (local time)', kind: 'datetime', required: true },
+      { key: 'end', label: 'Arrives (local time)', kind: 'datetime' },
+      { key: 'cabin', label: 'Cabin', kind: 'text' },
+      { key: 'deck', label: 'Deck', kind: 'text' },
+      { key: 'ref', label: 'Booking reference', kind: 'text' },
+      { key: 'cost', label: 'Cost', kind: 'money' },
+      { key: 'paid', label: 'Payment', kind: 'payment' },
+      { key: 'notes', label: 'Notes', kind: 'textarea' },
+    ],
+  },
+  transport: {
+    label: 'Transportation', plural: 'buses, taxis & transfers', icon: '🚌', color: '#65a30d', shape: 'journey', group: 'travel',
+    fields: [
+      { key: 'title', label: 'Name (optional)', kind: 'text', placeholder: 'e.g. Airport transfer' },
+      { key: 'provider', label: 'Company', kind: 'text' },
       { key: 'number', label: 'Service / ticket number', kind: 'text' },
       { key: 'from', label: 'From', kind: 'place', required: true },
       { key: 'to', label: 'To', kind: 'place', required: true },
-      { key: 'start', label: 'Departs', kind: 'datetime', required: true },
-      { key: 'end', label: 'Arrives', kind: 'datetime' },
+      { key: 'start', label: 'Departs (local time)', kind: 'datetime', required: true },
+      { key: 'end', label: 'Arrives (local time)', kind: 'datetime' },
+      { key: 'seat', label: 'Seats', kind: 'text' },
+      { key: 'phone', label: 'Contact phone', kind: 'text' },
       { key: 'ref', label: 'Booking reference', kind: 'text' },
       { key: 'cost', label: 'Cost', kind: 'money' },
       { key: 'paid', label: 'Payment', kind: 'payment' },
@@ -94,6 +271,11 @@ export const TYPES = {
     ],
   },
 };
+
+export const TYPE_GROUPS = [['travel', 'Travel & stays'], ['plans', 'Things to do'], ['other', 'Notes & places']];
+export const shapeOf = (type) => TYPES[type]?.shape || 'event';
+/** Event types with a start and end that can run over several days (shown as "ongoing"). */
+const SPANS = new Set(['parking']);
 
 // ---------- ids ----------
 
@@ -285,6 +467,11 @@ export function itemTitle(it) {
       return f && t ? `${head} · ${f} → ${t}` : head;
     }
     case 'car': return `Car hire${it.provider ? ` · ${it.provider}` : ''}`;
+    case 'rail': case 'ferry': case 'cruise': case 'transport': {
+      if (it.title) return it.title;
+      const head = [it.provider, it.number].filter(Boolean).join(' ') || TYPES[it.type].label;
+      return f && t ? `${head} · ${f} → ${t}` : head;
+    }
     case 'drive': return it.title || (t ? `Drive to ${t}` : 'Drive');
     default: return it.title || TYPES[it.type]?.label || 'Item';
   }
@@ -347,9 +534,9 @@ export function eventsForItem(it, bufferPct = 0) {
   const ev = [];
   const push = (e) => e.at && ev.push({ item: it, endAt: '', place: null, endPlace: null, ...e });
   const f = it.from, t = it.to;
-  switch (it.type) {
-    case 'flight':
-    case 'transport': {
+  const shape = shapeOf(it.type);
+  switch (shape === 'journey' ? 'journey' : it.type) {
+    case 'journey': {
       const what = it.type === 'flight' ? `Fly ${shortName(f) || '?'} → ${shortName(t) || '?'}` : itemTitle(it);
       push({ kind: 'depart', at: it.start, place: f, endPlace: t, label: what });
       if (it.end) push({ kind: 'arrive', at: it.end, place: t, label: `Arrive ${shortName(t) || ''}`.trim() });
@@ -366,13 +553,17 @@ export function eventsForItem(it, bufferPct = 0) {
     case 'drive':
       push({ kind: 'drive', at: it.start, endAt: itemEnd(it, bufferPct), place: f, endPlace: t, label: itemTitle(it) });
       break;
+    case 'parking':
+      push({ kind: 'activity', at: it.start, endAt: it.end && datePart(it.end) === datePart(it.start) ? it.end : '', place: it.place, label: `Park · ${itemTitle(it)}` });
+      if (it.end && datePart(it.end) !== datePart(it.start)) push({ kind: 'finish', at: it.end, place: it.place, label: `Collect car · ${itemTitle(it)}` });
+      break;
     default:
       push({ kind: 'activity', at: it.start, endAt: it.end && datePart(it.end) === datePart(it.start) ? it.end : '', place: it.place, label: itemTitle(it) });
   }
   return ev;
 }
 
-const KIND_ORDER = { checkout: 0, dropoff: 1, arrive: 2, pickup: 3, drive: 4, depart: 5, activity: 6, checkin: 7 };
+const KIND_ORDER = { checkout: 0, dropoff: 1, finish: 1, arrive: 2, pickup: 3, drive: 4, depart: 5, activity: 6, checkin: 7 };
 
 export function sortEvents(events) {
   return events.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9)));
@@ -396,8 +587,9 @@ export function dayAgenda(items, date, bufferPct = 0) {
   const ongoing = items.filter((it) => {
     if (!(it.start && it.end)) return false;
     const s = datePart(it.start), e = datePart(it.end);
-    if (it.type === 'car') return s < date && date < e;
-    if (it.type === 'activity') return s < date && date <= e;
+    const shape = shapeOf(it.type);
+    if (shape === 'car' || SPANS.has(it.type) || (shape === 'journey' && it.type !== 'flight')) return s < date && date < e;
+    if (shape === 'event') return s < date && date <= e;
     return false;
   });
   return { date, events, lastNight, tonight, ongoing };
@@ -509,6 +701,9 @@ export function toICS(tripName, items, bufferPct = 0, stamp = '20260101T000000Z'
     } else if (it.type === 'car') {
       add('-pick', `Pick up car: ${it.provider || ''}`.trim(), it.start, '', it.from);
       if (it.end) add('-drop', `Return car: ${it.provider || ''}`.trim(), it.end, '', it.to?.name ? it.to : it.from);
+    } else if (it.type === 'parking' && it.end && datePart(it.end) !== datePart(it.start)) {
+      add('-park', `Park: ${itemTitle(it)}`, it.start, '', it.place);
+      add('-collect', `Collect car: ${itemTitle(it)}`, it.end, '', it.place);
     } else {
       add('', itemTitle(it), it.start, itemEnd(it, bufferPct), it.place || it.from);
     }

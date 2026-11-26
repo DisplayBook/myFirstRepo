@@ -128,6 +128,7 @@ test('item and file validation still applies to admins', async () => {
   await createTrip('alice');
   const a = db('alice');
   await assertFails(setDoc(doc(a, 'trips', TRIP, 'items', 'i5'), { type: 'spaceship' }));
+  await assertSucceeds(setDoc(doc(a, 'trips', TRIP, 'items', 'i6'), { type: 'restaurant', start: '2026-12-02T19:30' }));
   await assertFails(setDoc(doc(a, 'trips', TRIP, 'files', 'f2'), { name: 'x', size: 20 * 1024 * 1024 }));
   await assertFails(setDoc(doc(a, 'trips', TRIP, 'files', 'f2', 'chunks', '0'), { i: 0, b: 'not bytes' }));
   await assertFails(setDoc(doc(a, 'trips', TRIP), { name: 'x', owner: 'bob' }), 'owner cannot change');
