@@ -1440,11 +1440,13 @@ function renderTripSettings() {
   };
   const aiOff = $('#ai-off');
   if (aiOff) aiOff.onclick = () => { S.settings = store.setSettings({ aiKey: '' }); toast('Key removed from this device'); render(); };
+  let voiceTestRun = 0;
   $$('[data-voice-test]').forEach((b) => {
     b.onclick = () => {
       const out = $('#voice-log');
       out.innerHTML = '';
-      const add = (t) => { if (out.isConnected) out.insertAdjacentHTML('beforeend', `<li>${esc(t)}</li>`); };
+      const run = ++voiceTestRun; // messages from an earlier test that arrive late are ignored
+      const add = (t) => { if (out.isConnected && run === voiceTestRun) out.insertAdjacentHTML('beforeend', `<li>${esc(t)}</li>`); };
       if (b.dataset.voiceTest !== 'natural') { voice.voiceTest({ plain: b.dataset.voiceTest === 'plain', onLog: add }); return; }
       if (S.trip.kind !== 'cloud') { add('Natural voices work on shared trips.'); return; }
       voice.stopSpeaking();
@@ -2423,6 +2425,8 @@ async function readAloud(text, { onState } = {}) {
         try { blob = await get(i); } catch (e) {
           if (!live()) return;
           if (i === 0 && (e.status === 501 || e.status === 404)) { naturalMissingUntil = Date.now() + 60000; return 'fallback'; }
+          // Natural voice busy or over its allowance: use this device's own voice where that works.
+          if (i === 0 && (e.status === 429 || e.status === 502) && voice.phoneVoiceWorks()) { toast(`${e.message} Using this device's voice for now.`); return 'fallback'; }
           state('error', e.message);
           return;
         }

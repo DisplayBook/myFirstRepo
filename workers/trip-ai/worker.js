@@ -338,6 +338,9 @@ async function handleSpeech(body, { env, uid, cfg, cors }) {
   try {
     bytes = await audioBytes(await env.AI.run(SPEECH_MODEL, { text, speaker, encoding: 'mp3' }, { returnRawResponse: true }));
   } catch (e) {
+    if (/\b429\b/.test(e.message) || /rate.?limit|capacity|neurons/i.test(e.message)) {
+      return errorResponse(429, 'rate_limit_error', 'Cloudflare\'s voice service is busy, or today\'s free voice allowance is used up. Try again in a few minutes; the allowance resets at midnight (UTC).', cors);
+    }
     return errorResponse(502, 'api_error', `the voice service failed (${e.message})`, cors);
   }
   if (!bytes.length) return errorResponse(502, 'api_error', 'the voice service returned no audio', cors);
