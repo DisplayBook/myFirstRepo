@@ -261,6 +261,18 @@ async function main() {
       await viewer.locator('#ideas').waitFor({ state: 'detached', timeout: 15000 });
     });
 
+    await check('packing: a view-only phone ticks items; the admin sees it live', async () => {
+      await alice.goto(`${BASE}#/packing`);
+      await alice.getByLabel('What to take').fill('Passport');
+      await alice.getByLabel('For').selectOption('shared');
+      await alice.getByLabel('What to take').press('Enter');
+      await alice.locator('.pk', { hasText: 'Passport' }).waitFor({ timeout: 15000 });
+      await viewer.goto(`${BASE}#/packing`);
+      await viewer.locator('.pk', { hasText: 'Passport' }).getByRole('checkbox').check({ timeout: 15000 });
+      await alice.locator('.pk.done', { hasText: 'Passport' }).waitFor({ timeout: 15000 });
+      await alice.getByText('1 of 1 packed').waitFor();
+    });
+
     await check('viewer can remove the trip from their phone only', async () => {
       await viewer.goto(`${BASE}#/trip`);
       viewer.once('dialog', (d) => d.accept());

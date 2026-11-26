@@ -472,6 +472,34 @@ export function normalizeFlightLookup(raw, date) {
   return out;
 }
 
+export const PACKING_TOOL = {
+  name: 'report_packing_list',
+  description: 'Report the suggested packing list. Call this exactly once.',
+  strict: true,
+  input_schema: obj({
+    items: {
+      type: 'array',
+      items: obj({
+        name: str('The thing to take, short, e.g. "Ski socks", "Travel adapter (EU)"'),
+        category: { type: 'string', enum: ['clothes', 'gear', 'toiletries', 'documents', 'electronics', 'health', 'kids', 'other'] },
+        who: str('"each" (one for every person), "shared" (one for the group), or one person\'s name exactly as given'),
+        qty: { type: 'integer', description: 'How many per person (1 if not countable)' },
+      }),
+    },
+  }),
+};
+
+/** A packing list for the trip. `context`: plain text about the trip, people and what's already on the list. */
+export function suggestPacking(auth, context, opts = {}) {
+  return searchAndReport(auth, {
+    ...opts,
+    system: 'You are a practical travel packing assistant. Build a complete but sensible packing list for this trip: clothes for the weather and activities, gear, toiletries, documents, electronics (with the right plug adapter), health items, and things for children if any. Use "each" for things every person needs, "shared" for one-per-group items, or a person\'s name for something only they need. Give quantities that fit the trip length. Don\'t repeat items already on the list. Aim for 25–50 items.',
+    prompt: `${context}\n\nCheck the likely weather for the destination and dates if useful, then call report_packing_list.`,
+    tool: PACKING_TOOL,
+    maxSearches: 2,
+  });
+}
+
 /** Known roadworks, closures and incidents for a drive. `drive`: {from, to, date, time, roads}. */
 export function roadConditions(apiKey, drive, opts = {}) {
   return searchAndReport(apiKey, {

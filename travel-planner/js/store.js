@@ -59,8 +59,8 @@ const local = {
   kind: 'local',
   open(id, onData, onStatus) {
     const cb = (data) => onData(data
-      ? { meta: data.meta || {}, items: Object.values(data.items || {}), files: Object.values(data.files || {}), role: 'admin', exists: true }
-      : { meta: {}, items: [], files: [], role: 'admin', exists: false });
+      ? { meta: data.meta || {}, items: Object.values(data.items || {}), files: Object.values(data.files || {}), packing: Object.values(data.packing || {}), role: 'admin', exists: true }
+      : { meta: {}, items: [], files: [], packing: [], role: 'admin', exists: false });
     if (!listeners.has(id)) listeners.set(id, new Set());
     listeners.get(id).add(cb);
     onStatus({ state: 'local' });
@@ -107,6 +107,19 @@ const local = {
     const blob = await idbGet(meta.id);
     if (!blob) throw new Error('This document is missing from this device');
     return blob;
+  },
+  async savePack(id, entries) {
+    const d = readJSON(tripKey(id), { meta: {}, items: {} });
+    d.packing = { ...d.packing };
+    for (const e of [].concat(entries)) d.packing[e.id] = e;
+    if (!writeJSON(tripKey(id), d)) throw new Error('Could not save: device storage is full');
+    emitLocal(id);
+  },
+  async deletePack(id, ids) {
+    const d = readJSON(tripKey(id), { meta: {}, items: {} });
+    for (const x of [].concat(ids)) delete d.packing?.[x];
+    writeJSON(tripKey(id), d);
+    emitLocal(id);
   },
   async addIdea(id, idea) {
     const d = readJSON(tripKey(id), { meta: {}, items: {} });
@@ -186,11 +199,11 @@ const cloud = {
   open(id, onData, onStatus) {
     let stopped = false;
     const unsubs = [];
-    let meta = null, metaExists = null, items = null, files = null, role = null;
+    let meta = null, metaExists = null, items = null, files = null, role = null, packing = null;
     let metaMeta = null, itemsMeta = null;
     const send = () => {
-      if (items === null || metaExists === null || files === null || role === null) return;
-      onData({ meta: meta || {}, items, files, role, exists: metaExists || items.length > 0 });
+      if (items === null || metaExists === null || files === null || role === null || packing === null) return;
+      onData({ meta: meta || {}, items, files, role, packing, exists: metaExists || items.length > 0 });
       const fromCache = metaMeta?.fromCache || itemsMeta?.fromCache;
       const pending = metaMeta?.hasPendingWrites || itemsMeta?.hasPendingWrites;
       onStatus({ state: pending ? 'pending' : fromCache ? 'offline' : 'synced' });
@@ -216,6 +229,9 @@ const cloud = {
       unsubs.push(fs.onSnapshot(fs.collection(db, 'trips', id, 'items'), { includeMetadataChanges: true }, (snap) => {
         items = snap.docs.map((d) => ({ ...d.data(), id: d.id })); itemsMeta = snap.metadata; send();
       }, onErr));
+      unsubs.push(fs.onSnapshot(fs.collection(db, 'trips', id, 'packing'), (snap) => {
+        packing = snap.docs.map((d) => ({ ...d.data(), id: d.id })); send();
+      }, () => { packing = []; send(); })); // rules not updated yet: packing just stays empty
       unsubs.push(fs.onSnapshot(fs.collection(db, 'trips', id, 'files'), (snap) => {
         files = snap.docs.map((d) => ({ ...d.data(), id: d.id })); send();
       }, (err) => { files = []; send(); onErr(err); }));
@@ -272,6 +288,8 @@ const cloud = {
     await Promise.all(files.docs.map((d) => cloud.deleteFile(id, { ...d.data(), id: d.id })));
     const snap = await fs.getDocs(fs.collection(db, 'trips', id, 'items'));
     await Promise.all(snap.docs.map((d) => fs.deleteDoc(d.ref)));
+    const pk = await fs.getDocs(fs.collection(db, 'trips', id, 'packing')).catch(() => ({ docs: [] }));
+    await Promise.all(pk.docs.map((d) => fs.deleteDoc(d.ref)));
     const invites = await fs.getDocs(fs.collection(db, 'trips', id, 'invites'));
     await Promise.all(invites.docs.map((d) => fs.deleteDoc(d.ref)));
     await fs.deleteDoc(fs.doc(db, 'trips', id));
@@ -289,6 +307,28 @@ const cloud = {
     const writes = chunks.map((c, i) => fs.setDoc(fs.doc(db, 'trips', id, 'files', meta.id, 'chunks', String(i)), { i, b: fs.Bytes.fromUint8Array(c) }));
     writes.push(fs.setDoc(fs.doc(db, 'trips', id, 'files', meta.id), { ...meta, chunks: chunks.length }));
     await Promise.all(writes);
+  },
+  // Packing: one document per person/item, so people can tick at the same time.
+  async savePack(id, entries) {
+    const { fs, db } = await loadCloud();
+    const list = [].concat(entries);
+    for (let i = 0; i < list.length; i += 400) {
+      const batch = fs.writeBatch(db);
+      for (const e of list.slice(i, i + 400)) {
+        const { id: eid, ...data } = e;
+        batch.set(fs.doc(db, 'trips', id, 'packing', eid), data);
+      }
+      await batch.commit();
+    }
+  },
+  async deletePack(id, ids) {
+    const { fs, db } = await loadCloud();
+    const list = [].concat(ids);
+    for (let i = 0; i < list.length; i += 400) {
+      const batch = fs.writeBatch(db);
+      for (const x of list.slice(i, i + 400)) batch.delete(fs.doc(db, 'trips', id, 'packing', x));
+      await batch.commit();
+    }
   },
   // Ideas live in the trip document; arrayUnion/arrayRemove keep two people
   // saving at the same time from overwriting each other.

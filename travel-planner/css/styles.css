@@ -403,6 +403,33 @@ fieldset.plain:disabled .place-quick, fieldset.plain:disabled .place-chosen .lin
 .lookup-wrap summary { cursor: pointer; color: var(--accent); font-weight: 600; min-height: 40px; display: flex; align-items: center; }
 .lookup-off { margin: 0; }
 
+/* ---------- packing ---------- */
+.pack-card { display: flex; align-items: center; gap: 12px; color: var(--text); text-decoration: none; }
+.pack-card-title { display: grid; flex: 1; gap: 2px; }
+.pack-card .chev { font-size: 1.4rem; color: var(--muted); }
+.small-meter { width: 70px; height: 8px; border-radius: 4px; background: var(--chip); overflow: hidden; flex: none; }
+.small-meter span, .meter span { display: block; height: 100%; background: var(--ok); }
+.pk-top { display: flex; align-items: center; gap: 10px; }
+.pk-top h1 { margin: 0; }
+.pk-people { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.pk-people .chip small { opacity: .75; margin-left: 2px; }
+.add-chip { border-style: dashed; }
+.pk-person-form { display: flex; gap: 8px; margin: 0 0 12px; }
+.pk-add-row { display: flex; gap: 8px; }
+.pk-add-row .pk-qty { width: 76px; flex: none; }
+.pk-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 4px 0 8px; }
+.pk-tools select { width: auto; min-height: 40px; }
+.pk-section h2 { display: flex; align-items: baseline; gap: 8px; }
+.pk-cat { font-size: .85rem; color: var(--muted); margin: 12px 0 4px; font-weight: 700; }
+.pk-list { list-style: none; margin: 0; padding: 0; }
+.pk { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); }
+.pk:last-child { border-bottom: 0; }
+.pk label { display: flex; align-items: center; gap: 12px; flex: 1; min-height: 48px; cursor: pointer; color: var(--text); font-weight: 500; font-size: 1rem; }
+.pk input[type=checkbox] { width: 24px; height: 24px; min-height: 0; flex: none; accent-color: var(--ok); }
+.pk.done .pk-name { color: var(--muted); text-decoration: line-through; }
+.pk-name small { color: var(--muted); font-weight: 600; }
+.pk-del { width: 36px; height: 36px; border: 0; background: transparent; color: var(--muted); font-size: .9rem; }
+
 /* ---------- plan ---------- */
 .plan-day { margin: 18px 0; }
 .plan-head { display: flex; justify-content: space-between; align-items: center; color: var(--text); text-decoration: none; font-weight: 700; padding: 6px 2px; min-height: 40px; border-bottom: 1px solid var(--line); }

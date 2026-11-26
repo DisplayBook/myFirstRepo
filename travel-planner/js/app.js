@@ -11,7 +11,8 @@ import { searchPlaces, driveRoute, cachedRoute, currentPosition, routeRoads } fr
 import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount, payment } from './budget.js';
-import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime, askTrip, flightDetails, normalizeFlightLookup } from './ai.js';
+import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime, askTrip, flightDetails, normalizeFlightLookup, suggestPacking } from './ai.js';
+import { SHARED, PACK_CATEGORIES, TEMPLATES, categoryLabel, splitPacking, expandItems, templateItems, progress as packProgress, groupByCategory, resolveWho } from './packing.js';
 import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea } from './chat.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -28,6 +29,7 @@ const S = {
   meta: {},
   items: [],
   files: [], // attached documents (metadata only)
+  packing: [], // packing list: people and items
   role: 'admin', // 'admin' can edit; 'viewer' opened a view-only link
   exists: null,
   status: { state: 'idle' },
@@ -91,11 +93,11 @@ const prefetched = new Set();
 function openTrip(id, kind) {
   if (S.close) S.close();
   S.trip = { id, kind };
-  S.meta = {}; S.items = []; S.files = []; S.exists = null; S.sig = ''; S.role = kind === 'cloud' ? 'viewer' : 'admin';
+  S.meta = {}; S.items = []; S.files = []; S.packing = []; S.exists = null; S.sig = ''; S.role = kind === 'cloud' ? 'viewer' : 'admin';
   S.settings = store.setSettings({ currentTrip: id });
   S.close = store.backendFor(kind).open(id, (data) => {
     const roleChanged = S.role !== (data.role || 'admin');
-    S.meta = data.meta; S.items = data.items; S.files = data.files || []; S.exists = data.exists;
+    S.meta = data.meta; S.items = data.items; S.files = data.files || []; S.packing = data.packing || []; S.exists = data.exists;
     S.role = data.role || 'admin';
     S.onFiles?.();
     if (kind === 'cloud' && navigator.onLine && S.files.length && !prefetched.has(id)) {
@@ -103,7 +105,7 @@ function openTrip(id, kind) {
       setTimeout(() => store.backendFor('cloud').prefetch(id, S.files).catch(() => {}), 3000);
     }
     if (data.meta.name) store.rememberTrip({ id, name: data.meta.name, kind });
-    const sig = JSON.stringify([data.meta, data.items, S.files.map((f) => [f.id, f.itemId])]);
+    const sig = JSON.stringify([data.meta, data.items, S.files.map((f) => [f.id, f.itemId]), S.packing]);
     if (sig !== S.sig || roleChanged) { S.sig = sig; render({ fromData: true }); }
   }, (st) => { S.status = st; renderStatus(); });
   renderStatus();
@@ -202,7 +204,7 @@ function render({ fromData = false } = {}) {
   // Don't rebuild the map for status-only updates while you're looking at it.
   if (fromData && name === 'map' && sheet.open) return;
   $$('.tabbar a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.tab === name));
-  $('#fab').hidden = name === 'trips' || !S.trip || !canEdit();
+  $('#fab').hidden = name === 'trips' || name === 'packing' || !S.trip || !canEdit();
   $('#chat-btn').hidden = name === 'trips' || !S.trip;
   document.body.dataset.view = name;
   if (name !== 'map') destroyMap();
@@ -213,6 +215,7 @@ function render({ fromData = false } = {}) {
     case 'map': renderMap(r.arg); break;
     case 'trip': renderTripSettings(); break;
     case 'budget': renderBudget(); break;
+    case 'packing': renderPacking(); break;
     default: renderToday(r.arg);
   }
   renderStatus();
@@ -563,6 +566,14 @@ async function refreshToday() {
   toast(tasks.length ? `Updated · ${tasks.length} live check${tasks.length === 1 ? '' : 's'} refreshed` : 'Up to date');
 }
 
+// Packing: ticking a checkbox saves at once.
+main.addEventListener('change', (e) => {
+  const t = e.target.closest('[data-pk-toggle]');
+  if (!t) return;
+  const it = S.packing.find((x) => x.id === t.dataset.pkToggle);
+  if (it) writePack((b, id) => b.savePack(id, { ...it, done: t.checked }));
+});
+
 // Pull down from the top of Today to refresh (iPhone home-screen apps have no built-in pull-to-refresh).
 const PULL = 70;
 let pull = null;
@@ -746,6 +757,183 @@ function ideasCard() {
   </section>`;
 }
 
+// ---------- Packing ----------
+
+const packPrefKey = () => `tp:pack:${S.trip?.id}`;
+function packPrefs() { try { return { who: 'all', hide: false, ...JSON.parse(localStorage.getItem(packPrefKey())) }; } catch { return { who: 'all', hide: false }; } }
+function setPackPrefs(p) { try { localStorage.setItem(packPrefKey(), JSON.stringify({ ...packPrefs(), ...p })); } catch { /* ignore */ } }
+
+/** Packing writes are open to everyone on the trip (view link included). */
+async function writePack(fn) {
+  const p = fn(backend(), S.trip.id);
+  if (S.trip.kind === 'cloud') {
+    p.catch((e) => toast(e.code === 'permission-denied'
+      ? 'Packing lists need the updated database rules (see README: paste firestore.rules again).'
+      : `Not saved: ${e.message}`));
+    return;
+  }
+  try { await p; } catch (e) { toast(e.message); throw e; }
+}
+const newEntry = (e) => cleanItem({ ...e, id: uid(16), at: new Date().toISOString(), by: S.settings.name });
+
+function packingCard() {
+  const { items } = splitPacking(S.packing);
+  const pr = packProgress(items);
+  return `<a class="card pack-card" href="#/packing">
+    <span class="pack-card-title"><strong>🎒 Packing list</strong>
+      <span class="muted small">${pr.total ? `${pr.done} of ${pr.total} packed` : 'Make a list of what everyone needs to take'}</span></span>
+    ${pr.total ? `<span class="meter small-meter"><span style="width:${Math.round((pr.done / pr.total) * 100)}%"></span></span>` : ''}
+    <span aria-hidden="true" class="chev">›</span></a>`;
+}
+
+function renderPacking() {
+  if (loadingOrMissing()) return;
+  const { people, items } = splitPacking(S.packing);
+  const prefs = packPrefs();
+  const who = prefs.who === 'all' || prefs.who === SHARED || people.some((p) => p.id === prefs.who) ? prefs.who : 'all';
+  const all = packProgress(items);
+  const nameOf = (id) => (id === SHARED ? 'Shared' : people.find((p) => p.id === id)?.name || 'Someone');
+  const chip = (id, label) => {
+    const pr = id === 'all' ? all : packProgress(items, id);
+    return `<button type="button" class="chip ${who === id ? 'sel' : ''}" data-pk-who="${esc(id)}">${esc(label)}${pr.total ? ` <small>${pr.done}/${pr.total}</small>` : ''}</button>`;
+  };
+  const row = (i) => `<li class="pk ${i.done ? 'done' : ''}">
+      <label><input type="checkbox" data-pk-toggle="${esc(i.id)}" ${i.done ? 'checked' : ''}>
+        <span class="pk-name">${esc(i.name)}${i.qty > 1 ? ` <small>×${i.qty}</small>` : ''}</span></label>
+      <button type="button" class="iconbtn small pk-del" data-pk-del="${esc(i.id)}" aria-label="Remove ${esc(i.name)}">✕</button></li>`;
+  const listFor = (list) => groupByCategory(prefs.hide ? list.filter((i) => !i.done) : list)
+    .map((g) => `<h3 class="pk-cat">${esc(g.label)}</h3><ul class="pk-list">${g.items.map(row).join('')}</ul>`).join('');
+  const sections = who === 'all'
+    ? [SHARED, ...people.map((p) => p.id)].map((id) => {
+      const list = items.filter((i) => i.who === id);
+      if (!list.length) return '';
+      const pr = packProgress(items, id);
+      const body = listFor(list);
+      return `<section class="card pk-section"><h2>${id === SHARED ? '👥 Shared' : `🙂 ${esc(nameOf(id))}`} <span class="muted small">${pr.done}/${pr.total}</span></h2>${body || '<p class="muted small">All packed ✓</p>'}</section>`;
+    }).join('')
+    : `<section class="card pk-section">${listFor(items.filter((i) => i.who === who)) || `<p class="muted small">${items.some((i) => i.who === who) ? 'All packed ✓' : 'Nothing on this list yet.'}</p>`}
+       ${who !== SHARED ? `<p class="small"><button type="button" class="link small danger-link" data-pk-remove-person="${esc(who)}">Remove ${esc(nameOf(who))} and their list</button></p>` : ''}</section>`;
+  const whoOptions = [
+    ...(people.length ? [['each', 'Each person']] : []),
+    [SHARED, 'Shared (one for the group)'],
+    ...people.map((p) => [p.id, p.name]),
+  ];
+  const defaultWho = who === 'all' ? (people.length ? 'each' : SHARED) : who;
+
+  main.innerHTML = `<div class="pk-top"><a class="iconbtn" href="#/plan" aria-label="Back to Plan">‹</a><h1>🎒 Packing</h1></div>
+    <p class="muted">${all.total ? `${all.done} of ${all.total} packed` : 'Add the people going, then what everyone needs to take.'}</p>
+    ${all.total ? `<div class="meter"><span style="width:${Math.round((all.done / all.total) * 100)}%"></span></div>` : ''}
+
+    <div class="pk-people" role="group" aria-label="Whose list">
+      ${chip('all', 'Everyone')}${chip(SHARED, 'Shared')}${people.map((p) => chip(p.id, p.name)).join('')}
+      <button type="button" class="chip add-chip" data-pk-add-person>＋ Add person</button>
+    </div>
+    <form class="pk-person-form" id="pk-person-form" hidden>
+      <input name="name" placeholder="Name, e.g. Alex" autocomplete="off" aria-label="Person's name" maxlength="60">
+      <button class="btn small">Add</button>
+    </form>
+
+    <form class="card form pk-add" id="pk-add">
+      <h2>Add something to take</h2>
+      <div class="pk-add-row">
+        <input name="name" placeholder="e.g. Ski socks" autocomplete="off" aria-label="What to take" maxlength="120" required>
+        <input name="qty" type="number" inputmode="numeric" min="1" max="99" value="1" aria-label="How many" class="pk-qty">
+      </div>
+      <div class="two">
+        <label>For<select name="who">${whoOptions.map(([v, l]) => `<option value="${esc(v)}" ${v === defaultWho ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+        <label>Category<select name="category">${PACK_CATEGORIES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select></label>
+      </div>
+      <button class="btn">Add</button>
+    </form>
+
+    <div class="pk-tools">
+      ${aiOn() ? '<button type="button" class="btn ghost small" data-pk-suggest>✨ Suggest a list</button>' : ''}
+      <select id="pk-template" aria-label="Add a ready-made list"><option value="">＋ Ready-made list…</option>${Object.entries(TEMPLATES).map(([k, t]) => `<option value="${k}">${esc(t.label)}</option>`).join('')}</select>
+      <label class="check small"><input type="checkbox" id="pk-hide" ${prefs.hide ? 'checked' : ''}> <span>Hide packed</span></label>
+      ${all.done ? '<button type="button" class="link small" data-pk-untick>Untick all</button>' : ''}
+    </div>
+
+    ${sections || (items.length ? '' : '<p class="empty">Nothing on the list yet. Add items above, pick a ready-made list, or let ✨ suggest one.</p>')}`;
+
+  $('#pk-add').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const drafts = expandItems([{ name: fd.get('name'), category: fd.get('category'), who: fd.get('who'), qty: fd.get('qty') }], people, S.packing);
+    if (!drafts.length) { toast('Already on the list'); return; }
+    writePack((b, id) => b.savePack(id, drafts.map(newEntry)));
+    e.target.elements.name.value = '';
+    e.target.elements.qty.value = '1';
+    e.target.elements.name.focus();
+    toast(drafts.length > 1 ? `Added for ${drafts.length} people` : 'Added');
+  };
+  $('#pk-person-form').onsubmit = (e) => {
+    e.preventDefault();
+    const name = new FormData(e.target).get('name').trim();
+    if (!name) return;
+    if (people.some((p) => p.name.toLowerCase() === name.toLowerCase())) { toast(`${name} is already on the trip`); return; }
+    writePack((b, id) => b.savePack(id, [newEntry({ kind: 'person', name })]));
+    toast(`${name} added`);
+  };
+  $('#pk-hide').onchange = (e) => { setPackPrefs({ hide: e.target.checked }); renderPacking(); };
+  $('#pk-template').onchange = (e) => {
+    const key = e.target.value;
+    e.target.value = '';
+    if (!key) return;
+    const drafts = expandItems(templateItems(key), people, S.packing);
+    if (!drafts.length) { toast('Everything from that list is already there'); return; }
+    if (!confirm(`Add ${drafts.length} item${drafts.length === 1 ? '' : 's'} from "${TEMPLATES[key].label}"${people.length ? ' for everyone' : ''}?`)) return;
+    writePack((b, id) => b.savePack(id, drafts.map(newEntry)));
+    toast(`${drafts.length} items added`);
+  };
+}
+
+function packingContext(people, items) {
+  const span = tripSpan(S.meta, S.items);
+  const places = [...new Set(S.items.flatMap((it) => [it.place, it.to].filter((p) => p?.name).map((p) => p.name)))].slice(0, 12);
+  const activities = S.items.filter((it) => it.type === 'activity').map((it) => it.title).slice(0, 20);
+  return [
+    `Trip: ${S.meta.name || 'Trip'}${span.start ? `, ${span.start} to ${span.end} (${dateRange(span.start, span.end).length} days)` : ''}.`,
+    places.length ? `Places: ${places.join('; ')}.` : '',
+    activities.length ? `Planned activities: ${activities.join('; ')}.` : '',
+    S.items.some((it) => it.type === 'car') ? 'They have a hire car.' : '',
+    S.items.some((it) => it.type === 'flight') ? 'They are flying (cabin/hold bags).' : '',
+    `People: ${people.length ? people.map((p) => p.name).join(', ') : 'not listed (use "each" for personal items)'}.`,
+    items.length ? `Already on the list: ${items.map((i) => `${i.name} (${i.who === SHARED ? 'shared' : people.find((p) => p.id === i.who)?.name || '?'})`).join('; ').slice(0, 4000)}.` : '',
+  ].filter(Boolean).join('\n');
+}
+
+async function openPackSuggest() {
+  const { people, items } = splitPacking(S.packing);
+  openSheet(`<div class="sheet-head"><h2>✨ Suggest a packing list</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    <p class="small" role="status">⏳ Looking at your trip${people.length ? ` and ${people.length} ${people.length === 1 ? 'person' : 'people'}` : ''}… (up to a minute)</p>`, 'Suggest a packing list');
+  try {
+    const raw = await suggestPacking(await aiAuth(), packingContext(people, items));
+    const list = (raw.items || []).map((x) => ({ ...x, who: resolveWho(x.who, people) }));
+    const drafts = expandItems(list, people, S.packing);
+    if (!sheet.open) return;
+    if (!drafts.length) { sheetBody.querySelector('[role=status]').textContent = 'Nothing new to add: your list already covers it.'; return; }
+    const whoName = (id) => (id === SHARED ? 'Shared' : people.find((p) => p.id === id)?.name || 'Shared');
+    openSheet(`<form class="form" id="pk-suggest">
+      <div class="sheet-head"><h2>✨ Suggested: ${drafts.length} items</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+      <p class="muted small">Untick anything you don't need, then add the rest.</p>
+      ${groupByCategory(drafts.map((d, i) => ({ ...d, id: String(i) }))).map((g) => `<h3 class="pk-cat">${esc(g.label)}</h3><ul class="pk-list">${g.items.map((d) => `<li class="pk"><label>
+        <input type="checkbox" name="s" value="${d.id}" checked><span class="pk-name">${esc(d.name)}${d.qty > 1 ? ` <small>×${d.qty}</small>` : ''} <small class="muted">· ${esc(whoName(d.who))}</small></span></label></li>`).join('')}</ul>`).join('')}
+      <div class="row sticky-actions"><span class="grow"></span><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" id="pk-suggest-add">Add selected</button></div>
+    </form>`, 'Suggested packing list');
+    $('#pk-suggest').onsubmit = (e) => {
+      e.preventDefault();
+      const chosen = new FormData(e.target).getAll('s').map(Number);
+      const add = chosen.map((i) => drafts[i]).filter(Boolean);
+      if (add.length) writePack((b, id) => b.savePack(id, add.map(newEntry)));
+      closeSheet();
+      toast(`${add.length} item${add.length === 1 ? '' : 's'} added`);
+    };
+  } catch (err) {
+    const st = sheetBody.querySelector('[role=status]');
+    if (st) { st.className = 'error small'; st.textContent = friendlyError(err); }
+  }
+}
+
 // ---------- Plan (whole itinerary) ----------
 
 function renderPlan() {
@@ -755,13 +943,14 @@ function renderPlan() {
   const today = localDate();
   if (!S.items.length) {
     main.innerHTML = `<h1>Plan</h1><div class="empty"><p>No plans yet. Add flights, hotels, car hire, drives and activities.</p>
-      ${canEdit() ? '<button type="button" class="btn" data-add>Add the first item</button>' : ''}</div>${ideasCard()}`;
+      ${canEdit() ? '<button type="button" class="btn" data-add>Add the first item</button>' : ''}</div>${packingCard()}${ideasCard()}`;
     return;
   }
   const counts = Object.fromEntries(Object.keys(TYPES).map((k) => [k, S.items.filter((i) => i.type === k).length]));
   main.innerHTML = `<h1>Plan</h1>
     <p class="muted">${esc(fmtDate(span.start, { long: true }))} – ${esc(fmtDate(span.end, { long: true }))} · ${days.length} day${days.length === 1 ? '' : 's'}</p>
     <div class="ctx">${Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `<span>${TYPES[k].icon} ${n} ${esc(n === 1 ? TYPES[k].label.toLowerCase() : TYPES[k].plural)}</span>`).join('')}</div>
+    ${packingCard()}
     ${ideasCard()}
     ${tilesToggle()}
     ${days.map((d, i) => {
@@ -1273,6 +1462,37 @@ main.addEventListener('click', (e) => {
     return;
   }
   if (e.target.closest('[data-refresh]')) { refreshToday(); return; }
+  const pkWho = e.target.closest('[data-pk-who]');
+  if (pkWho) { setPackPrefs({ who: pkWho.dataset.pkWho }); renderPacking(); return; }
+  if (e.target.closest('[data-pk-add-person]')) { const f = $('#pk-person-form'); f.hidden = !f.hidden; if (!f.hidden) f.elements.name.focus(); return; }
+  if (e.target.closest('[data-pk-suggest]')) { openPackSuggest(); return; }
+  const pkDel = e.target.closest('[data-pk-del]');
+  if (pkDel) {
+    const it = S.packing.find((x) => x.id === pkDel.dataset.pkDel);
+    if (it) {
+      writePack((b, id) => b.deletePack(id, it.id));
+      toast(`Removed ${it.name}`, { label: 'Undo', run: () => writePack((b, id) => b.savePack(id, it)) });
+    }
+    return;
+  }
+  const pkRemove = e.target.closest('[data-pk-remove-person]');
+  if (pkRemove) {
+    const pid = pkRemove.dataset.pkRemovePerson;
+    const person = S.packing.find((x) => x.id === pid);
+    const theirs = S.packing.filter((x) => x.kind === 'item' && x.who === pid);
+    if (person && confirm(`Remove ${person.name} and their ${theirs.length} item${theirs.length === 1 ? '' : 's'}?`)) {
+      writePack((b, id) => b.deletePack(id, [pid, ...theirs.map((x) => x.id)]));
+      setPackPrefs({ who: 'all' });
+    }
+    return;
+  }
+  if (e.target.closest('[data-pk-untick]')) {
+    const done = S.packing.filter((x) => x.kind === 'item' && x.done);
+    if (done.length && confirm(`Untick all ${done.length} packed items (e.g. to pack for the way home)?`)) {
+      writePack((b, id) => b.savePack(id, done.map((x) => ({ ...x, done: false }))));
+    }
+    return;
+  }
   const tm = e.target.closest('[data-tiles]');
   if (tm) {
     S.settings = store.setSettings({ tiles: tm.dataset.tiles });
@@ -2067,7 +2287,7 @@ function openChat() {
     try {
       const content = await askTrip(await aiAuth(), {
         system: CHAT_SYSTEM,
-        context: buildTripContext({ meta: S.meta, items: S.items, files: S.files, now: localDateTime(), live: liveNotes() }),
+        context: buildTripContext({ meta: S.meta, items: S.items, files: S.files, now: localDateTime(), live: liveNotes(), packing: S.packing }),
         history: before.filter((m) => !m.error).slice(-20).map((m) => ({ role: m.role, text: m.text })),
         question: text,
         signal: chatAbort.signal,

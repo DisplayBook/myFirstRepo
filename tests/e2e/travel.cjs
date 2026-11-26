@@ -393,6 +393,11 @@ async function main() {
               from: { name: 'New York JFK (JFK)', search: 'JFK Airport, New York', terminal: 'Terminal 8', time: '19:00', date: '2026-12-05' },
               to: { name: 'London Heathrow (LHR)', search: 'Heathrow Airport, London', terminal: 'T5', time: '07:05', date: '' },
               aircraft: 'Boeing 777-300ER', note: '', source: 'FlightAware' },
+            report_packing_list: { items: [
+              { name: 'Après-ski boots', category: 'clothes', who: 'each', qty: 1 },
+              { name: 'Kids ski gloves', category: 'kids', who: 'Mia', qty: 1 },
+              { name: 'US plug adapter', category: 'electronics', who: 'shared', qty: 2 },
+            ] },
             report_road_conditions: { level: 'minor', extraMinutes: 15, summary: 'Lane closures on I-95 near New Haven.', issues: [{ road: 'I-95', issue: 'Lane closures near New Haven', when: '10:00–15:00' }] },
             report_day_brief: { overview: 'A relaxed day: MoMA in the morning, then pick up the car.', weather: 'Cold and sunny, 4°C.', tips: ['Book MoMA tickets online to skip the queue.'], suggestions: [
               { name: 'Joe\'s Pizza', category: 'restaurant', why: 'Classic slice near Times Square.', when: 'Lunch', address: '1435 Broadway, New York' },
@@ -760,6 +765,68 @@ async function main() {
       // The ↻ Refresh link does the same.
       await page.getByRole('button', { name: '↻ Refresh' }).click();
       await page.getByText(/Updated · 1 live check refreshed/).waitFor();
+    });
+
+    await check('packing list: people, items for each/shared, tick, hide packed, templates, AI suggestions', async () => {
+      await page.goto(`${BASE}#/plan`);
+      await page.locator('.pack-card').click();
+      await page.getByRole('heading', { name: '🎒 Packing' }).waitFor();
+      for (const name of ['Alex', 'Mia']) {
+        if (await page.locator('#pk-person-form').isHidden()) await page.getByRole('button', { name: '＋ Add person' }).click();
+        await page.getByLabel('Person\'s name').fill(name);
+        await page.getByLabel('Person\'s name').press('Enter');
+        await page.locator('.pk-people').getByRole('button', { name: new RegExp(`^${name}`) }).waitFor();
+      }
+      // One item for each person.
+      await page.getByLabel('What to take').fill('Ski jacket');
+      assert.equal(await page.getByLabel('For').inputValue(), 'each');
+      await page.getByLabel('Category').selectOption('clothes');
+      await page.getByRole('button', { name: 'Add', exact: true }).last().click();
+      await page.getByText('Added for 2 people').waitFor();
+      assert.equal(await page.locator('.pk', { hasText: 'Ski jacket' }).count(), 2);
+      // A shared item with a quantity.
+      await page.getByLabel('What to take').fill('Sun cream');
+      await page.getByLabel('How many').fill('2');
+      await page.getByLabel('For').selectOption('shared');
+      await page.getByLabel('Category').selectOption('toiletries');
+      await page.getByLabel('What to take').press('Enter');
+      await page.locator('.pk-section', { hasText: 'Shared' }).getByText('Sun cream').waitFor();
+      // Tick Alex's jacket.
+      const alex = page.locator('.pk-section', { hasText: '🙂 Alex' });
+      await alex.locator('.pk', { hasText: 'Ski jacket' }).getByRole('checkbox').check();
+      await alex.getByText('1/1').waitFor();
+      await page.getByText('1 of 3 packed').waitFor();
+      // Hide packed.
+      await page.getByLabel('Hide packed').check();
+      await alex.getByText('All packed ✓').waitFor();
+      await page.getByLabel('Hide packed').uncheck();
+      // Ready-made ski list for everyone (minus duplicates).
+      page.once('dialog', (d) => { assert.match(d.message(), /Ski trip/); d.accept(); });
+      await page.locator('#pk-template').selectOption('ski');
+      await page.getByText(/items added/).waitFor();
+      assert.equal(await page.locator('.pk', { hasText: 'Ski jacket' }).count(), 2, 'no duplicate jackets');
+      await page.locator('.pk', { hasText: 'Goggles' }).first().waitFor();
+      // AI suggestions: review and add.
+      await page.getByRole('button', { name: '✨ Suggest a list' }).click();
+      await page.getByRole('heading', { name: /Suggested: 4 items/ }).waitFor();
+      const sreq = calls.at(-1).body;
+      assert.ok(sreq.tools.some((t) => t.name === 'report_packing_list'));
+      assert.match(JSON.stringify(sreq.messages), /People: Alex, Mia/);
+      await page.locator('#pk-suggest .pk', { hasText: 'US plug adapter' }).getByRole('checkbox').uncheck();
+      await page.getByRole('button', { name: 'Add selected' }).click();
+      await page.getByText('3 items added').waitFor();
+      await page.locator('.pk-section', { hasText: '🙂 Mia' }).getByText('Kids ski gloves').waitFor();
+      assert.equal(await page.locator('.pk', { hasText: 'US plug adapter' }).count(), 0);
+      await shot(page, '21-packing');
+      // Filter to one person, then remove them.
+      await page.locator('.pk-people').getByRole('button', { name: /^Mia/ }).click();
+      assert.equal(await page.locator('.pk-section').count(), 1);
+      page.once('dialog', (d) => d.accept());
+      await page.getByRole('button', { name: 'Remove Mia and their list' }).click();
+      await page.locator('.pk-people').getByRole('button', { name: /^Mia/ }).waitFor({ state: 'detached' });
+      // Progress shows on the Plan card; persists after reload.
+      await page.goto(`${BASE}#/plan`);
+      await page.locator('.pack-card').getByText(/1 of \d+ packed/).waitFor();
     });
 
     await check('layout fits a phone screen (no sideways scroll)', async () => {
