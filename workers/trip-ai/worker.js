@@ -60,7 +60,7 @@ async function googleKeys(fetchImpl) {
 }
 
 /** Verify a Firebase ID token; returns the user's uid or throws. */
-export async function verifyFirebaseToken(token, projectId, fetchImpl = fetch, nowSec = Math.floor(Date.now() / 1000)) {
+async function verifyFirebaseToken(token, projectId, fetchImpl = fetch, nowSec = Math.floor(Date.now() / 1000)) {
   const parts = String(token || '').split('.');
   if (parts.length !== 3) throw new Error('bad token');
   const [h, p, s] = parts;
@@ -79,7 +79,7 @@ export async function verifyFirebaseToken(token, projectId, fetchImpl = fetch, n
 }
 
 /** Only the kinds of request the app makes. Returns an error message or ''. */
-export function checkBody(body) {
+function checkBody(body) {
   if (!body || typeof body !== 'object') return 'request body must be JSON';
   if (!ALLOWED_MODELS.includes(body.model)) return 'model not allowed';
   if (!(Number(body.max_tokens) > 0 && Number(body.max_tokens) <= MAX_TOKENS)) return 'max_tokens too large';
@@ -98,7 +98,7 @@ export function checkBody(body) {
  * Build the Worker's fetch handler. Options exist for tests:
  *  verifyToken(token, projectId) -> uid, fetch (outbound), firestoreBase.
  */
-export function makeHandler(opts = {}) {
+function makeHandler(opts = {}) {
   const fetchImpl = opts.fetch || ((...a) => fetch(...a));
   const firestoreBase = opts.firestoreBase || FIRESTORE;
   const verify = opts.verifyToken || ((t, pid) => verifyFirebaseToken(t, pid, fetchImpl));
@@ -187,4 +187,9 @@ export function makeHandler(opts = {}) {
 }
 
 const handler = makeHandler();
-export default { fetch: (request, env) => handler(request, env) };
+// Only a default export, so the file can be pasted into the Cloudflare editor as-is.
+// _test exposes the helpers to the repo's tests; Cloudflare ignores it.
+export default {
+  fetch: (request, env) => handler(request, env),
+  _test: { makeHandler, verifyFirebaseToken, checkBody },
+};

@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeHandler, verifyFirebaseToken, checkBody } from '../../workers/trip-ai/worker.js';
+import worker from '../../workers/trip-ai/worker.js';
+
+const { makeHandler, verifyFirebaseToken, checkBody } = worker._test;
 
 const PROJECT = 'my-travel-planner-57cef';
 const ORIGIN = 'https://displaybook.github.io';
