@@ -1339,6 +1339,12 @@ function renderTripSettings() {
           <label>Directions open in<select name="maps"><option value="google">Google Maps</option><option value="apple" ${S.settings.maps === 'apple' ? 'selected' : ''}>Apple Maps</option></select></label>
           <label>Answers to 🎤 questions<select name="voiceReplies"><option value="1">Read aloud</option><option value="0" ${S.settings.voiceReplies === false ? 'selected' : ''}>Text only</option></select></label>
         </div>
+        <details class="small voice-check"><summary>🔊 Test voice</summary>
+          <p class="muted">Plays a test sentence and shows what the phone reports. Turn the silent switch off first.</p>
+          <div class="row"><button type="button" class="btn ghost small" data-voice-test="chat">Test (as in chat)</button>
+          <button type="button" class="btn ghost small" data-voice-test="plain">Test (simple)</button></div>
+          <ol class="voice-log" id="voice-log" aria-live="polite"></ol>
+        </details>
       </form>
     </section>
     <section class="card">
@@ -1411,6 +1417,13 @@ function renderTripSettings() {
   };
   const aiOff = $('#ai-off');
   if (aiOff) aiOff.onclick = () => { S.settings = store.setSettings({ aiKey: '' }); toast('Key removed from this device'); render(); };
+  $$('[data-voice-test]').forEach((b) => {
+    b.onclick = () => {
+      const out = $('#voice-log');
+      out.innerHTML = '';
+      voice.voiceTest({ plain: b.dataset.voiceTest === 'plain', onLog: (t) => { if (out.isConnected) out.insertAdjacentHTML('beforeend', `<li>${esc(t)}</li>`); } });
+    };
+  });
   $('#prefs').onchange = (e) => {
     const fd = new FormData(e.currentTarget);
     S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps'), voiceReplies: fd.get('voiceReplies') !== '0' });

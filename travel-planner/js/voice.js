@@ -145,3 +145,35 @@ export function stopSpeaking() {
   session++;
   if (canSpeak()) window.speechSynthesis.cancel();
 }
+
+/**
+ * Voice check for Trip → On this device: speaks a test sentence and reports
+ * what the phone says is happening. `plain` skips the voice choice and audio
+ * mode, to tell a phone problem from an app one. Must be called from a tap.
+ */
+export function voiceTest({ plain = false, onLog } = {}) {
+  const log = (s) => onLog?.(s);
+  if (!canSpeak()) { log('❌ This browser has no speech (speechSynthesis missing).'); return; }
+  const synth = window.speechSynthesis;
+  const standalone = window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+  log(`App: ${standalone ? 'Home Screen' : 'browser'} · language ${lang()} · audio mode ${navigator.audioSession ? navigator.audioSession.type : 'n/a'}`);
+  if (!plain) audioMode('playback');
+  if (synth.speaking || synth.pending) synth.cancel();
+  const u = new SpeechSynthesisUtterance('This is a voice test from your trip planner.');
+  if (!plain) {
+    u.lang = lang();
+    const v = bestVoice();
+    if (v) u.voice = v;
+    log(`Voice: ${v ? `${v.name} (${v.lang}${v.localService ? ', on phone' : ''})` : 'phone default'}`);
+  }
+  keep.add(u);
+  let started = false;
+  u.onstart = () => { started = true; log('▶️ Started speaking'); };
+  u.onend = () => { keep.delete(u); log(started ? '✅ Finished. Did you hear it?' : '⚠️ Ended without starting'); };
+  u.onerror = (e) => { keep.delete(u); log(`❌ Error: ${e.error || 'unknown'}`); };
+  synth.speak(u);
+  setTimeout(() => {
+    log(`Voices on this phone: ${synth.getVoices?.().length || 0}`);
+    if (!started) log('⚠️ Nothing started after 4 seconds: the phone did not begin speaking.');
+  }, 4000);
+}
