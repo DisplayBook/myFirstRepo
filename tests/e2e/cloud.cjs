@@ -119,6 +119,8 @@ async function main() {
     await context.addInitScript(() => {
       window.__played = [];
       HTMLMediaElement.prototype.play = function play() {
+        // Like an iPhone after using the microphone: the next answer needs a tap.
+        if (window.__blockNext && this.src.startsWith('blob:')) { window.__blockNext = false; return Promise.reject(new DOMException('needs a tap', 'NotAllowedError')); }
         window.__played.push(this.src.split(':')[0]);
         if (this.src.startsWith('blob:')) setTimeout(() => this.dispatchEvent(new Event('ended')), 50);
         return Promise.resolve();
@@ -395,11 +397,18 @@ async function main() {
       // In the chat, Read aloud uses it, with the answer as plain sentences.
       await viewer.getByRole('button', { name: 'Ask about this trip' }).click();
       const before = speechCalls.length;
+      await viewer.evaluate(() => { window.__played = []; });
       await viewer.locator('.msg.bot').first().getByRole('button', { name: 'Read this answer aloud' }).click();
+      await viewer.waitForFunction(() => window.__played.includes('blob'));
       for (let i = 0; i < 50 && speechCalls.length === before; i++) await viewer.waitForTimeout(100);
       const said = speechCalls.at(-1).inputs.text;
       assert.match(said, /10:00/);
       assert.doesNotMatch(said, /\*\*/);
+      // If the phone won't start the sound by itself, one tap on ▶ Play answer does.
+      await viewer.evaluate(() => { window.__blockNext = true; window.__played = []; });
+      await viewer.locator('.msg.bot').first().getByRole('button', { name: 'Read this answer aloud' }).click();
+      await viewer.getByRole('button', { name: '▶ Play answer' }).click();
+      await viewer.waitForFunction(() => window.__played.includes('blob'));
       await viewer.locator('#sheet').getByRole('button', { name: 'Close' }).click();
 
       // A server without voice set up says so.

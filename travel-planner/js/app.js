@@ -1452,7 +1452,7 @@ function renderTripSettings() {
       const name = voiceId();
       add(`Asking the trip server for the ${NATURAL_VOICES.find(([k]) => k === name)?.[1] || name} voice…`);
       fetchSpeech('Hello! This is the voice that will read your trip answers.', name)
-        .then((blob) => { add(`Got ${Math.round(blob.size / 1024)} KB of audio. Playing…`); return voice.playAudio(blob, { onEnd: () => add('✅ Finished. Did you hear it?') }); })
+        .then((blob) => { naturalMissingUntil = 0; add(`Got ${Math.round(blob.size / 1024)} KB of audio. Playing…`); return voice.playAudio(blob, { onEnd: () => add('✅ Finished. Did you hear it?') }); })
         .catch((e) => add(e.status === 501 || e.status === 404
           ? '❌ The trip server isn\'t set up for voice yet (it needs the Workers AI binding and the latest worker code).'
           : e.name === 'NotAllowedError' ? '❌ The phone blocked playback. Tap the button again.' : `❌ ${e.message}`));
@@ -1461,7 +1461,7 @@ function renderTripSettings() {
   $('#prefs').onchange = (e) => {
     const fd = new FormData(e.currentTarget);
     S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps'), voiceReplies: fd.get('voiceReplies') !== '0', voiceName: fd.get('voiceName') || '' });
-    if (e.target.name === 'voiceName') naturalMissing = false;
+    if (e.target.name === 'voiceName') naturalMissingUntil = 0;
   };
   if (cloud) {
     let code = '';
@@ -2354,8 +2354,8 @@ const NATURAL_VOICES = [
   ['pandora', 'British woman'], ['draco', 'British man'], ['thalia', 'American woman'],
   ['apollo', 'American man'], ['theia', 'Australian woman'], ['hyperion', 'Australian man'],
 ];
-let naturalMissing = false; // the trip server said it has no voice set up
-const naturalVoice = () => !!(aiProxyUrl && S.trip?.kind === 'cloud' && S.settings.voiceName !== 'phone' && !naturalMissing);
+let naturalMissingUntil = 0; // the trip server recently said it has no voice set up
+const naturalVoice = () => !!(aiProxyUrl && S.trip?.kind === 'cloud' && S.settings.voiceName !== 'phone' && Date.now() > naturalMissingUntil);
 function voiceId() {
   if (NATURAL_VOICES.some(([k]) => k === S.settings.voiceName)) return S.settings.voiceName;
   const l = (navigator.language || '').toLowerCase();
@@ -2382,27 +2382,50 @@ function unlockVoice() {
   if (voice.isSpeaking()) voice.stopSpeaking(); else voice.unlockSpeech();
 }
 let readSeq = 0;
-/** Read an answer aloud. onEnd when it finishes, is stopped, or can't play. */
-async function readAloud(text, { onEnd } = {}) {
+/**
+ * Read an answer aloud. onState(state, extra) reports progress:
+ * 'loading' → 'playing' → 'done'; 'blocked' (extra: play() to call from a tap)
+ * when the phone wouldn't start the sound by itself; 'error' (extra: message).
+ */
+async function readAloud(text, { onState } = {}) {
   const seq = ++readSeq;
   const plain = speakableText(text);
+  const state = (s, x) => { if (seq === readSeq || s === 'done') onState?.(s, x); };
+  const done = () => state('done');
   if (naturalVoice()) {
+    state('loading');
+    let blob;
     try {
-      const blob = await fetchSpeech(plain);
-      if (seq !== readSeq) { onEnd?.(); return; }
-      await voice.playAudio(blob, { onEnd });
-      return;
+      blob = await fetchSpeech(plain);
     } catch (e) {
-      if (seq !== readSeq) { onEnd?.(); return; }
-      if (e.status === 501 || e.status === 404) naturalMissing = true; // server not set up for voice yet: use the phone's
-      else {
-        onEnd?.();
-        toast(e.name === 'NotAllowedError' ? 'Tap 🔊 Read aloud to hear the answer' : e.message);
-        return;
+      if (seq !== readSeq) return;
+      if (e.status === 501 || e.status === 404) {
+        naturalMissingUntil = Date.now() + 60000; // server not set up for voice: try again in a minute
+      } else { state('error', e.message); return; }
+    }
+    if (seq !== readSeq) return;
+    if (blob) {
+      try {
+        await voice.playAudio(blob, { onEnd: done });
+        state('playing');
+      } catch (e) {
+        if (seq !== readSeq) return;
+        if (e.name === 'NotAllowedError') {
+          // iPhone needs a tap to start this sound (e.g. after using the microphone).
+          state('blocked', () => voice.playAudio(blob, { onEnd: done }).then(() => state('playing'), (x) => state('error', x.message)));
+        } else state('error', 'This phone couldn\'t play the voice.');
       }
+      return;
     }
   }
-  voice.speak(plain, { onEnd });
+  if (!voice.phoneVoiceWorks()) {
+    state('error', aiProxyUrl && S.trip?.kind === 'cloud'
+      ? 'The trip server isn\'t set up for voice yet (see Trip → Test voice).'
+      : 'Reading aloud needs a shared trip on this iPhone.');
+    return;
+  }
+  state('playing');
+  voice.speak(plain, { onEnd: done });
 }
 function stopReading() { readSeq++; voice.stopSpeaking(); }
 
@@ -2485,11 +2508,29 @@ function openChat() {
   const mic = $('#chat-mic');
   const stopBtn = $('#chat-stop');
   const PLACEHOLDER = q.placeholder;
-  const say = (text) => {
-    stopBtn.hidden = false;
-    readAloud(text, { onEnd: () => { if (stopBtn.isConnected) stopBtn.hidden = true; } });
+  // One button shows what reading aloud is doing: getting the voice, stop, or play (when the phone needs a tap).
+  let playBlocked = null;
+  const voiceBtn = (label) => {
+    if (!stopBtn.isConnected) return;
+    stopBtn.hidden = !label;
+    stopBtn.textContent = label || '';
   };
-  stopBtn.onclick = () => { stopReading(); stopBtn.hidden = true; };
+  const say = (text) => {
+    playBlocked = null;
+    readAloud(text, {
+      onState: (st, x) => {
+        if (st === 'loading') voiceBtn('⏳ Getting voice… ■');
+        else if (st === 'playing') voiceBtn('■ Stop reading');
+        else if (st === 'blocked') { playBlocked = x; voiceBtn('▶ Play answer'); }
+        else if (st === 'error') { voiceBtn(''); toast(x); }
+        else voiceBtn('');
+      },
+    });
+  };
+  stopBtn.onclick = () => {
+    if (playBlocked) { const play = playBlocked; playBlocked = null; play(); return; }
+    stopReading(); voiceBtn('');
+  };
   const micState = (on) => {
     mic.classList.toggle('on', on);
     mic.setAttribute('aria-pressed', String(on));
