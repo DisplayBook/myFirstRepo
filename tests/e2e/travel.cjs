@@ -56,7 +56,7 @@ async function main() {
   try {
     const context = await browser.newContext({ ...devices['iPhone 13'], acceptDownloads: true });
     // These checks cover device-only trips, so run without shared sync.
-    await context.route('**/travel-planner/js/config.js', (route) => route.fulfill({ contentType: 'text/javascript', body: 'export const firebaseConfig = null;' }));
+    await context.route('**/travel-planner/js/config.js', (route) => route.fulfill({ contentType: 'text/javascript', body: 'export const firebaseConfig = null; export const aiProxyUrl = null;' }));
     await context.route('https://nominatim.openstreetmap.org/**', (route) => {
       const q = new URL(route.request().url()).searchParams.get('q').toLowerCase();
       const hit = Object.entries(PLACES).find(([k]) => q.includes(k));
@@ -398,13 +398,13 @@ async function main() {
       await page.getByRole('button', { name: 'Add to the plan' }).click();
       await page.getByRole('button', { name: /Scan a booking/ }).click();
       await page.getByRole('link', { name: 'Set up scanning' }).click();
-      await page.getByRole('heading', { name: 'Scanning bookings' }).waitFor();
+      await page.getByRole('heading', { name: 'AI features' }).waitFor();
       await page.getByLabel('API key').fill('not-a-key');
       await page.getByRole('button', { name: 'Turn on scanning' }).click();
       await page.getByText(/doesn't look like an Anthropic API key/).waitFor();
       await page.getByLabel('API key').fill('sk-ant-api03-testkey0123456789');
       await page.getByRole('button', { name: 'Turn on scanning' }).click();
-      await page.getByText(/Scanning is on for this device/).waitFor();
+      await page.getByText(/On for this phone with its own key/).waitFor();
 
       await page.getByRole('button', { name: 'Add to the plan' }).click();
       await page.getByRole('button', { name: /Scan a booking/ }).click();

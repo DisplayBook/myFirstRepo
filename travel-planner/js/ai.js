@@ -78,10 +78,20 @@ function loadSdk() {
   return sdkPromise;
 }
 
-async function makeClient(apiKey) {
+/**
+ * auth: an API key string or {apiKey} (the phone's own key, sent to Anthropic), or
+ * {baseURL, apiKey, headers} for the trip's AI server, where apiKey is the
+ * phone's Firebase sign-in token and the server adds the real key.
+ */
+async function makeClient(auth) {
   const Anthropic = await loadSdk();
-  // Browser use is intentional: the key belongs to the person using this device.
-  return new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 2, timeout: 120000 });
+  const a = typeof auth === 'string' ? { apiKey: auth } : auth;
+  // Browser use is intentional: the key belongs to the person using this phone,
+  // or the request goes to the trip's own AI server.
+  return new Anthropic({
+    apiKey: a.apiKey, baseURL: a.baseURL, defaultHeaders: a.headers,
+    dangerouslyAllowBrowser: true, maxRetries: 2, timeout: 120000,
+  });
 }
 
 // ---------- input preparation (browser) ----------
@@ -152,6 +162,9 @@ function textOf(message) {
 
 export function friendlyError(err) {
   const status = err?.status;
+  // Messages from the trip's AI server explain themselves.
+  const own = String(err?.error?.error?.message || err?.message || '').match(/Trip AI: (.*)$/s);
+  if (own) return own[1].replace(/["}\]]+$/, '').trim();
   if (status === 401) return 'The API key was not accepted. Check it in Trip → Scanning.';
   if (status === 403) return 'This API key is not allowed to use Claude. Check your Anthropic Console account.';
   if (status === 429) return 'Too many requests or out of credit right now. Try again in a minute, or check your Anthropic Console billing.';
