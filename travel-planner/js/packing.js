@@ -1,5 +1,7 @@
 // Packing lists: people on the trip, things to take, ticked off when packed.
 // Pure functions (no DOM), unit-tested.
+
+import { tripSpan, dateRange, dayAgenda, fmtDate, timePart, datePart, daysBetween, itemTitle } from './logic.js';
 //
 // Entries (one document each, so people can tick at the same time):
 //   person: { id, kind: 'person', name, at }
@@ -123,3 +125,60 @@ export function resolveWho(who, people) {
   const p = people.find((x) => norm(x.name) === w) || people.find((x) => norm(x.name).split(' ')[0] === w.split(' ')[0]);
   return p ? p.id : SHARED;
 }
+
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/**
+ * Everything a packing suggestion should be based on: dates and season, where
+ * they'll be each day and night, what they'll do, how they travel, who's going
+ * and what's already on the list.
+ */
+export function packingTripContext({ meta = {}, items = [], packing = [] }) {
+  const { people, items: packItems } = splitPacking(packing);
+  const span = tripSpan(meta, items);
+  const out = [`Trip: ${meta.name || 'Trip'}`];
+  if (span.start) {
+    const days = dateRange(span.start, span.end);
+    const months = [...new Set(days.map((d) => MONTHS[Number(d.slice(5, 7)) - 1]))];
+    out.push(`Dates: ${fmtDate(span.start, { long: true })} to ${fmtDate(span.end, { long: true })} (${days.length} day${days.length === 1 ? '' : 's'}, ${months.join('/')} ${span.start.slice(0, 4)})`);
+    out.push('', 'Day by day (local times):');
+    for (const d of days) {
+      const ag = dayAgenda(items, d);
+      const bits = ag.events.map((ev) => {
+        const where = ev.place?.name && !ev.label.includes(ev.place.name.split(',')[0]) ? ` (${ev.place.name})` : '';
+        return `${timePart(ev.at)} ${ev.label}${where}`;
+      });
+      if (ag.tonight) bits.push(`night at ${ag.tonight.title}${ag.tonight.place?.name ? `, ${ag.tonight.place.name}` : ''}`);
+      out.push(`- ${fmtDate(d)}: ${bits.length ? bits.join('; ') : 'free day'}`);
+    }
+  } else {
+    out.push('Dates: not set yet');
+  }
+  const stays = items.filter((i) => i.type === 'hotel');
+  if (stays.length) {
+    out.push('', 'Stays:');
+    for (const h of stays) {
+      const n = h.start && h.end ? daysBetween(datePart(h.start), datePart(h.end)) : 0;
+      out.push(`- ${h.title}${h.place?.name ? `, ${h.place.name}` : ''}: ${fmtDate(datePart(h.start))}${h.end ? ` to ${fmtDate(datePart(h.end))}` : ''}${n ? ` (${n} night${n === 1 ? '' : 's'})` : ''}`);
+    }
+  }
+  const places = [...new Set(items.flatMap((i) => (i.type === 'flight' || i.type === 'transport' ? [i.to] : i.type === 'drive' ? [i.to] : [i.place, i.from]))
+    .filter((p) => p?.name).map((p) => p.name))].slice(0, 15);
+  if (places.length) out.push('', `Destinations to check the weather for: ${places.join(' | ')}`);
+  const activities = items.filter((i) => i.type === 'activity').map((i) => `${i.title}${i.start ? ` (${fmtDate(datePart(i.start))})` : ''}`);
+  if (activities.length) out.push(`Planned activities: ${activities.slice(0, 25).join('; ')}`);
+  const travel = [
+    items.some((i) => i.type === 'flight') && `flying (${items.filter((i) => i.type === 'flight').map(itemTitle).slice(0, 6).join('; ')})`,
+    items.some((i) => i.type === 'car') && 'hire car',
+    items.some((i) => i.type === 'drive') && 'long drives',
+    items.some((i) => i.type === 'transport') && 'trains/buses/ferries',
+  ].filter(Boolean);
+  if (travel.length) out.push(`Getting around: ${travel.join(', ')}`);
+  out.push('', `People: ${people.length ? people.map((p) => p.name).join(', ') : 'not listed (use "each" for personal items)'}`);
+  if (packItems.length) {
+    const whoName = (id) => (id === SHARED ? 'shared' : people.find((p) => p.id === id)?.name || '?');
+    out.push(`Already on the list: ${packItems.map((i) => `${i.name} (${whoName(i.who)})`).join('; ').slice(0, 4000)}`);
+  }
+  return out.join('\n');
+}
+

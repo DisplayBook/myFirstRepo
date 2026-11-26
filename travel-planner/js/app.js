@@ -12,7 +12,7 @@ import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount, payment } from './budget.js';
 import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime, askTrip, flightDetails, normalizeFlightLookup, suggestPacking } from './ai.js';
-import { SHARED, PACK_CATEGORIES, TEMPLATES, categoryLabel, splitPacking, expandItems, templateItems, progress as packProgress, groupByCategory, resolveWho } from './packing.js';
+import { SHARED, PACK_CATEGORIES, TEMPLATES, categoryLabel, splitPacking, expandItems, templateItems, progress as packProgress, groupByCategory, resolveWho, packingTripContext } from './packing.js';
 import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea } from './chat.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -887,27 +887,13 @@ function renderPacking() {
   };
 }
 
-function packingContext(people, items) {
-  const span = tripSpan(S.meta, S.items);
-  const places = [...new Set(S.items.flatMap((it) => [it.place, it.to].filter((p) => p?.name).map((p) => p.name)))].slice(0, 12);
-  const activities = S.items.filter((it) => it.type === 'activity').map((it) => it.title).slice(0, 20);
-  return [
-    `Trip: ${S.meta.name || 'Trip'}${span.start ? `, ${span.start} to ${span.end} (${dateRange(span.start, span.end).length} days)` : ''}.`,
-    places.length ? `Places: ${places.join('; ')}.` : '',
-    activities.length ? `Planned activities: ${activities.join('; ')}.` : '',
-    S.items.some((it) => it.type === 'car') ? 'They have a hire car.' : '',
-    S.items.some((it) => it.type === 'flight') ? 'They are flying (cabin/hold bags).' : '',
-    `People: ${people.length ? people.map((p) => p.name).join(', ') : 'not listed (use "each" for personal items)'}.`,
-    items.length ? `Already on the list: ${items.map((i) => `${i.name} (${i.who === SHARED ? 'shared' : people.find((p) => p.id === i.who)?.name || '?'})`).join('; ').slice(0, 4000)}.` : '',
-  ].filter(Boolean).join('\n');
-}
 
 async function openPackSuggest() {
   const { people, items } = splitPacking(S.packing);
   openSheet(`<div class="sheet-head"><h2>✨ Suggest a packing list</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
-    <p class="small" role="status">⏳ Looking at your trip${people.length ? ` and ${people.length} ${people.length === 1 ? 'person' : 'people'}` : ''}… (up to a minute)</p>`, 'Suggest a packing list');
+    <p class="small" role="status">⏳ Checking your destinations, dates and the expected weather${people.length ? ` for ${people.length} ${people.length === 1 ? 'person' : 'people'}` : ''}… (up to a minute)</p>`, 'Suggest a packing list');
   try {
-    const raw = await suggestPacking(await aiAuth(), packingContext(people, items));
+    const raw = await suggestPacking(await aiAuth(), packingTripContext({ meta: S.meta, items: S.items, packing: S.packing }));
     const list = (raw.items || []).map((x) => ({ ...x, who: resolveWho(x.who, people) }));
     const drafts = expandItems(list, people, S.packing);
     if (!sheet.open) return;
@@ -915,6 +901,7 @@ async function openPackSuggest() {
     const whoName = (id) => (id === SHARED ? 'Shared' : people.find((p) => p.id === id)?.name || 'Shared');
     openSheet(`<form class="form" id="pk-suggest">
       <div class="sheet-head"><h2>✨ Suggested: ${drafts.length} items</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+      ${raw.summary ? `<p class="pk-basis">📍 ${esc(raw.summary)}</p>` : ''}
       <p class="muted small">Untick anything you don't need, then add the rest.</p>
       ${groupByCategory(drafts.map((d, i) => ({ ...d, id: String(i) }))).map((g) => `<h3 class="pk-cat">${esc(g.label)}</h3><ul class="pk-list">${g.items.map((d) => `<li class="pk"><label>
         <input type="checkbox" name="s" value="${d.id}" checked><span class="pk-name">${esc(d.name)}${d.qty > 1 ? ` <small>×${d.qty}</small>` : ''} <small class="muted">· ${esc(whoName(d.who))}</small></span></label></li>`).join('')}</ul>`).join('')}

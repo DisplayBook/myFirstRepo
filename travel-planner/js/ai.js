@@ -477,6 +477,7 @@ export const PACKING_TOOL = {
   description: 'Report the suggested packing list. Call this exactly once.',
   strict: true,
   input_schema: obj({
+    summary: str('One line on what the list is based on: destinations, dates, expected weather and plug type, e.g. "Munich & Kitzbühel, 21–28 Aug: 18–26°C, afternoon storms likely; Type F plugs".'),
     items: {
       type: 'array',
       items: obj({
@@ -493,10 +494,10 @@ export const PACKING_TOOL = {
 export function suggestPacking(auth, context, opts = {}) {
   return searchAndReport(auth, {
     ...opts,
-    system: 'You are a practical travel packing assistant. Build a complete but sensible packing list for this trip: clothes for the weather and activities, gear, toiletries, documents, electronics (with the right plug adapter), health items, and things for children if any. Use "each" for things every person needs, "shared" for one-per-group items, or a person\'s name for something only they need. Give quantities that fit the trip length. Don\'t repeat items already on the list. Aim for 25–50 items.',
-    prompt: `${context}\n\nCheck the likely weather for the destination and dates if useful, then call report_packing_list.`,
+    system: 'You are a practical travel packing assistant. Base the list on THIS trip: its destinations, dates and season, what they will do each day, how they travel, and who is going. First search for the expected weather at each destination for those dates (if the trip is more than ~2 weeks away, use the typical climate for that place and time of year), the plug type and voltage, and anything local that changes what to pack (altitude, snow, beach, rain season, dress codes, mosquitoes). Then build a complete but sensible list: clothes for that weather and those activities, gear, toiletries, documents, electronics (the right adapter), health items, and things for children if any. Use "each" for things every person needs, "shared" for one-per-group items, or a person\'s name for something only they need. Quantities should fit the trip length. Don\'t repeat items already on the list. Aim for 25–50 items.',
+    prompt: `${context}\n\nLook up the weather and local conditions for these destinations and dates, then call report_packing_list (with a one-line summary of what the list is based on).`,
     tool: PACKING_TOOL,
-    maxSearches: 2,
+    maxSearches: 4,
   });
 }
 
