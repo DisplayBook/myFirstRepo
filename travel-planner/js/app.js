@@ -6,6 +6,7 @@ import {
   cleanItem, eventsForItem, dayAgenda, tripSpan, defaultDay, driveLegs, legStatus, hotelForNight, toICS,
 } from './logic.js';
 import * as store from './store.js';
+import { aiProxyUrl } from './config.js';
 import { searchPlaces, driveRoute, cachedRoute, currentPosition, routeRoads } from './geo.js';
 import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
@@ -101,6 +102,18 @@ function backend() { return store.backendFor(S.trip.kind); }
 
 /** Admin devices can change the trip; view-only devices can't. */
 const canEdit = () => S.role !== 'viewer';
+
+/**
+ * AI features: a key saved on this phone wins; otherwise shared trips use the
+ * trip's AI server (workers/trip-ai), which holds the key for everyone.
+ */
+const sharedAi = () => !!(aiProxyUrl && S.trip?.kind === 'cloud');
+const aiOn = () => !!S.settings.aiKey || sharedAi();
+async function aiAuth() {
+  if (S.settings.aiKey) return { apiKey: S.settings.aiKey };
+  if (sharedAi()) return { baseURL: aiProxyUrl, apiKey: await store.idToken(), headers: { 'x-trip-id': S.trip.id } };
+  throw new Error('AI features aren\'t set up on this phone');
+}
 
 /** Run a write. Local writes are awaited; cloud writes are optimistic (they also work offline). */
 async function write(fn) {
@@ -401,8 +414,8 @@ function liveHtml(ev) {
   if (daysAway < -1) return '';
   const wrap = (inner, cls = '') => `<div class="live ${cls}" data-live="${kind}" data-item="${esc(it.id)}">${inner}</div>`;
   if (kind === 'flight' && !it.number) return wrap('<span class="muted small">Add the flight number to check its live status.</span>');
-  if (!S.settings.aiKey) {
-    return wrap(`<span class="muted small">${kind === 'flight' ? 'Live flight status' : 'Road disruption checks'} need the AI key on this phone. <a href="#/trip">Set up</a></span>`);
+  if (!aiOn()) {
+    return wrap(`<span class="muted small">${kind === 'flight' ? 'Live flight status' : 'Road disruption checks'} need AI features. <a href="#/trip">Set up</a></span>`);
   }
   const k = liveKey(kind, it);
   if (liveBusy.has(k)) return wrap(`<span class="small" role="status">⏳ Checking ${kind === 'flight' ? 'flight status' : 'the route'}… (up to a minute)</span>`);
@@ -451,14 +464,14 @@ function refreshLive(kind, itemId) {
 
 async function checkLive(kind, itemId) {
   const it = S.items.find((i) => i.id === itemId);
-  if (!it || !S.settings.aiKey) return;
+  if (!it || !aiOn()) return;
   const k = liveKey(kind, it);
   if (liveBusy.has(k)) return;
   liveBusy.add(k); liveErr.delete(k);
   refreshLive(kind, itemId);
   try {
     if (kind === 'flight') {
-      const data = await flightStatus(S.settings.aiKey, {
+      const data = await flightStatus(await aiAuth(), {
         // "117" + airline "BA" → "BA 117", so the search finds the right flight.
         number: /[A-Za-z]/.test(it.number) ? it.number : `${it.provider || ''} ${it.number}`.trim(),
         airline: it.provider, from: it.from?.name, to: it.to?.name,
@@ -467,7 +480,7 @@ async function checkLive(kind, itemId) {
       liveSet(k, data);
     } else {
       const roads = await routeRoads(it.from, it.to).catch(() => []);
-      const data = await roadConditions(S.settings.aiKey, {
+      const data = await roadConditions(await aiAuth(), {
         from: it.from?.name, to: it.to?.name, date: datePart(it.start), time: timePart(it.start), roads, now: localDateTime(),
       });
       liveSet(k, { ...data, roads });
@@ -483,8 +496,8 @@ async function checkLive(kind, itemId) {
 const briefKey = (day) => `brief:${S.trip?.id}:${day}`;
 
 function briefHtml(day) {
-  if (!S.settings.aiKey) {
-    return `<h2>✨ Day summary</h2><p class="muted small">Get an AI overview of the day with weather, tips and nearby places to eat and visit. Needs the AI key on this phone: <a href="#/trip">set it up in Trip</a>.</p>`;
+  if (!aiOn()) {
+    return `<h2>✨ Day summary</h2><p class="muted small">Get an AI overview of the day with weather, tips and nearby places to eat and visit. Needs AI features: <a href="#/trip">set them up in Trip</a>.</p>`;
   }
   const k = briefKey(day);
   if (liveBusy.has(k)) return '<h2>✨ Day summary</h2><p class="small" role="status">⏳ Looking at your day, the weather and what\'s nearby… (up to a minute)</p>';
@@ -492,7 +505,7 @@ function briefHtml(day) {
   const cached = liveGet(k);
   if (!cached) {
     return `<h2>✨ Day summary</h2>
-      <p class="muted small">An overview of this day with weather, tips and suggestions for places to visit or eat near your plans. Uses your Anthropic key (a few cents per summary).</p>
+      <p class="muted small">An overview of this day with weather, tips and suggestions for places to visit or eat near your plans.</p>
       ${err ? `<p class="error small">${esc(err)}</p>` : ''}
       <button type="button" class="btn" data-brief>✨ Summarise this day</button>`;
   }
@@ -536,12 +549,12 @@ function dayContext(day) {
 
 async function runBrief(day) {
   const k = briefKey(day);
-  if (liveBusy.has(k) || !S.settings.aiKey) return;
+  if (liveBusy.has(k) || !aiOn()) return;
   liveBusy.add(k); liveErr.delete(k);
   const paint = () => { const el = $('#brief'); if (el && el.dataset.day === day) el.innerHTML = briefHtml(day); };
   paint();
   try {
-    liveSet(k, await dayBrief(S.settings.aiKey, dayContext(day)));
+    liveSet(k, await dayBrief(await aiAuth(), dayContext(day)));
   } catch (err) {
     liveErr.set(k, friendlyError(err));
   } finally {
@@ -859,14 +872,18 @@ function renderTripSettings() {
       ${S.files.length ? `<div id="all-docs"></div>` : '<p class="muted">Tickets, booking confirmations and photos you attach to bookings appear here.</p>'}
     </section>
     <section class="card" id="scan-settings">
-      <h2>Scanning bookings</h2>
-      <p>Scan a photo, screenshot, PDF or confirmation email and the app fills in the booking for you, and turns photos of documents into text. This uses Claude (by Anthropic) with your own API key.</p>
-      ${S.settings.aiKey ? `<p>✅ Scanning is on for this device (key ending …${esc(S.settings.aiKey.slice(-4))}).</p>
-        <button type="button" class="btn ghost danger" id="ai-off">Remove key from this device</button>`
-        : `<ol class="steps small">
+      <h2>AI features</h2>
+      <p>Scan bookings, live flight status, road delays, day summaries and the trip chat use Claude (by Anthropic).</p>
+      ${S.settings.aiKey ? `<p>✅ On for this phone with its own key (ending …${esc(S.settings.aiKey.slice(-4))}).</p>
+        <button type="button" class="btn ghost danger" id="ai-off">Remove key from this phone</button>`
+        : sharedAi() ? `<p>✅ On for everyone on this trip. The app uses the trip's shared AI key, so nobody needs their own.</p>
+        <details class="small"><summary>Use my own key on this phone instead</summary>
+          <form id="ai-form" class="form"><label>API key<input name="key" type="password" autocomplete="off" placeholder="sk-ant-…" required></label>
+          <button class="btn ghost">Use my key</button></form></details>`
+        : `${aiProxyUrl ? '<p class="muted small">The shared AI key works on shared trips. For a trip on this phone only, add a key here.</p>' : ''}<ol class="steps small">
           <li>Sign in at <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> and add some credit (each scan costs a few cents).</li>
           <li>Go to <strong>API keys → Create key</strong> and copy it.</li>
-          <li>Paste it here. It stays on this device only and is never shared with the trip.</li></ol>
+          <li>Paste it here. It stays on this phone only and is never shared with the trip.</li></ol>
         <form id="ai-form" class="form"><label>API key<input name="key" type="password" autocomplete="off" placeholder="sk-ant-…" required></label>
         <button class="btn">Turn on scanning</button></form>`}
     </section>
@@ -1428,7 +1445,7 @@ function openDriveCalc() {
 let lastScan = null; // {drafts, docs, added:Set} kept while the app is open
 
 function openScan() {
-  if (!S.settings.aiKey) {
+  if (!aiOn()) {
     openSheet(`<div class="sheet-head"><h2>✨ Scan a booking</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
       <p>Scanning reads photos, screenshots, PDFs and confirmation emails and fills in the booking for you. It uses Claude with your own Anthropic API key, which you add once on this device.</p>
       <div class="row"><a class="btn" href="#/trip" data-close id="go-setup">Set up scanning</a></div>`, 'Scan a booking');
@@ -1452,7 +1469,7 @@ function openScan() {
     status.textContent = 'Reading… this usually takes 10–30 seconds.';
     try {
       const span = tripSpan(S.meta, S.items);
-      const res = await extractBookings(S.settings.aiKey, input, {
+      const res = await extractBookings(await aiAuth(), input, {
         tripName: S.meta.name, start: span.start, end: span.end, today: localDate(), currency: homeCurrency(S.meta),
       });
       const drafts = normalizeBookings(res.bookings, { currency: homeCurrency(S.meta) });
@@ -1591,7 +1608,7 @@ function chatBubble(m) {
 
 function openChat() {
   if (!S.trip) return;
-  if (!S.settings.aiKey) {
+  if (!aiOn()) {
     openSheet(`<div class="sheet-head"><h2>💬 Ask about this trip</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
       <p>Ask anything about your trip: times, booking references, what's still to pay, where to eat near your plans. It uses Claude with your own Anthropic API key, which you add once on this phone.</p>
       <div class="row"><a class="btn" href="#/trip" id="go-setup-chat">Set up AI features</a></div>`, 'Ask about this trip');
@@ -1642,7 +1659,7 @@ function openChat() {
     $('#chat-send').disabled = true;
     chatAbort = new AbortController();
     try {
-      const content = await askTrip(S.settings.aiKey, {
+      const content = await askTrip(await aiAuth(), {
         system: CHAT_SYSTEM,
         context: buildTripContext({ meta: S.meta, items: S.items, files: S.files, now: localDateTime(), live: liveNotes() }),
         history: before.filter((m) => !m.error).slice(-20).map((m) => ({ role: m.role, text: m.text })),
@@ -1749,13 +1766,13 @@ function renderDocText(view, f, blob) {
       <button type="button" class="btn small ghost" data-copy>Copy text</button></details>`;
     $('pre', box).textContent = f.text;
     $('[data-copy]', box).onclick = () => navigator.clipboard.writeText(f.text).then(() => toast('Text copied'), () => toast('Couldn\'t copy'));
-  } else if (canRead && S.settings.aiKey && canEdit()) {
+  } else if (canRead && aiOn() && canEdit()) {
     box.innerHTML = '<button type="button" class="btn small ghost" data-gettext>📝 Get the text from this document</button>';
     $('[data-gettext]', box).onclick = async (e) => {
       e.target.disabled = true;
       e.target.textContent = 'Reading… (usually 10–30 seconds)';
       try {
-        const text = (await transcribe(S.settings.aiKey, blob)).slice(0, 50000);
+        const text = (await transcribe(await aiAuth(), blob)).slice(0, 50000);
         f.text = text;
         await write((b, id) => b.updateFile(id, { id: f.id, text }));
         box.remove();

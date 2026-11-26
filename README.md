@@ -186,9 +186,24 @@ The key is stored only on that device (it's never put into the shared trip), and
 
 On iPhone, the easiest way to scan an email is to copy its text (press and hold → Select All → Copy) and paste it in, or take a screenshot of it.
 
+## Shared AI key (optional, so nobody needs their own key)
+
+The AI features normally need an Anthropic key on each phone. Instead, a small free server can hold one key for everyone on your shared trips: [`workers/trip-ai/worker.js`](workers/trip-ai/worker.js), a Cloudflare Worker. Phones never see the key. Each request is checked: it must come from the app's address, carry the phone's Firebase sign-in (verified against Google's keys), belong to a phone on that trip (asked of Firestore, so the database rules decide), stay under a daily limit per phone, and be one of the requests the app makes. Then the key is added and the request is passed to Anthropic.
+
+1. Create a free account at <https://dash.cloudflare.com>.
+2. **Workers & Pages → Create → Create Worker** (start from "Hello World"), name it `trip-ai`, click **Deploy**.
+3. Click **Edit code**, delete everything, paste the contents of `workers/trip-ai/worker.js`, and click **Deploy**.
+4. Worker **Settings → Variables and Secrets → Add**: type **Secret**, name `ANTHROPIC_API_KEY`, value: your Anthropic key. **Deploy**.
+5. Daily limit (recommended): **Storage & Databases → KV → Create** a namespace called `trip-ai-usage`. Then the worker's **Settings → Bindings → Add → KV namespace**: variable name `USAGE`, namespace `trip-ai-usage`.
+6. Optional variables (Settings → Variables and Secrets, type **Text**): `DAILY_LIMIT` (requests per phone per day, default 40) and `ACCESS` (`everyone` = anyone with the trip link, default; `admins` = admin phones only).
+7. Copy the worker's address (like `https://trip-ai.yourname.workers.dev`) into `aiProxyUrl` in [`travel-planner/js/config.js`](travel-planner/js/config.js), commit and push.
+
+Also set a monthly spending limit in the Anthropic Console (Settings → Limits). Phones with their own key keep using it; device-only trips need a key on the phone.
+
 ## Notes
 
 - Times are stored exactly as you type them (the local time on your ticket), with no time-zone conversion, so a 09:30 departure from London and an 11:20 arrival in New York both show as printed.
 - Tests: `npm test` (includes `tests/unit/travel-planner.test.js`) and `npm run test:e2e:travel` (phone-sized browser test with the map and route services mocked).
+- `tests/unit/ai-proxy.test.js` checks the AI server: token signatures, trip membership, admins-only mode, allowed requests, daily limit, CORS.
 - Sharing tests (need Java and `npm install`): `npm run test:rules` checks `firestore.rules` in the Firestore emulator (viewers can't write, admin links, new admin links); `npm run test:e2e:cloud` runs several phones against the Auth + Firestore emulators with the real Firebase SDK.
 - Icons: `node scripts/make-travel-icons.cjs`. After changing files, bump `VERSION` in `travel-planner/sw.js`.

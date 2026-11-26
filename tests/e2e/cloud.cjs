@@ -20,7 +20,41 @@ const FB_DIR = path.dirname(require.resolve('firebase/package.json'));
 const CONFIG = `export const firebaseConfig = {
   apiKey: 'demo-key', authDomain: 'demo-trips.firebaseapp.com', projectId: 'demo-trips', appId: '1:1:web:1',
   emulators: { firestore: '127.0.0.1:8085', auth: '127.0.0.1:9099' },
-};`;
+};
+export const aiProxyUrl = 'https://trip-ai.test';`;
+
+// The trip's AI server (workers/trip-ai) runs in this process. Membership is checked
+// against the Firestore emulator; Anthropic is mocked. Emulator sign-in tokens are
+// unsigned, so the token's signature check is replaced by a project check here.
+const upstreamCalls = [];
+class FakeKV { constructor() { this.m = new Map(); } async get(k) { return this.m.get(k) ?? null; } async put(k, v) { this.m.set(k, v); } }
+const proxyEnv = { ANTHROPIC_API_KEY: 'sk-ant-server-key', ALLOWED_ORIGIN: `http://localhost:${PORT}`, FIREBASE_PROJECT_ID: 'demo-trips', USAGE: new FakeKV(), DAILY_LIMIT: '3' };
+let proxyHandler;
+async function getProxy() {
+  if (proxyHandler) return proxyHandler;
+  const { makeHandler } = await import('../../workers/trip-ai/worker.js');
+  proxyHandler = makeHandler({
+    firestoreBase: 'http://127.0.0.1:8085/v1',
+    verifyToken: async (token, project) => {
+      const p = JSON.parse(Buffer.from(String(token).split('.')[1] || '', 'base64url').toString() || '{}');
+      if (p.aud !== project || !p.sub) throw new Error('bad token');
+      return p.sub;
+    },
+    fetch: async (url, init) => {
+      if (!String(url).startsWith('https://api.anthropic.com/')) return fetch(url, init);
+      upstreamCalls.push({ url: String(url), headers: init.headers, body: JSON.parse(init.body) });
+      const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+      const sse = ev('message_start', { message: { id: 'msg_p', type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } } })
+        + ev('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })
+        + ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'The Colosseum tour is at **10:00** on Wed 2 Dec.' } })
+        + ev('content_block_stop', { index: 0 })
+        + ev('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } })
+        + ev('message_stop', {});
+      return new Response(sse, { headers: { 'content-type': 'text/event-stream', 'request-id': 'req_p' } });
+    },
+  });
+  return proxyHandler;
+}
 
 async function main() {
   const server = spawn(process.execPath, [path.join(__dirname, '../../scripts/serve.mjs'), String(PORT)], { stdio: 'ignore' });
@@ -42,6 +76,12 @@ async function main() {
       route.fulfill({ status: 200, contentType: 'text/javascript', body: fs.readFileSync(file) });
     });
     await context.route('**/travel-planner/js/config.js', (route) => route.fulfill({ contentType: 'text/javascript', body: CONFIG }));
+    await context.route('https://trip-ai.test/**', async (route) => {
+      const r = route.request();
+      const handler = await getProxy();
+      const res = await handler(new Request(r.url(), { method: r.method(), headers: await r.allHeaders(), body: ['GET', 'HEAD'].includes(r.method()) ? undefined : r.postDataBuffer() }), proxyEnv);
+      await route.fulfill({ status: res.status, headers: Object.fromEntries(res.headers), body: Buffer.from(await res.arrayBuffer()) });
+    });
     await context.route(/nominatim|project-osrm|tile\.openstreetmap/, (route) => route.fulfill({ json: [] }));
     const page = await context.newPage();
     page.on('pageerror', (e) => errors.push(`${name}: ${e.message}`));
@@ -163,6 +203,32 @@ async function main() {
       await viewer.getByRole('button', { name: 'View tickets.pdf' }).click();
       await viewer.locator('.doc-view a', { hasText: 'Open' }).waitFor({ timeout: 15000 });
       await viewer.locator('.sticky-actions').getByRole('button', { name: 'Close' }).click();
+    });
+
+    await check('shared AI key: a view-only phone uses the trip chat through the AI server', async () => {
+      await viewer.goto(`${BASE}#/trip`);
+      await viewer.getByText('On for everyone on this trip').waitFor({ timeout: 20000 });
+      await viewer.getByRole('button', { name: 'Ask about this trip' }).click();
+      await viewer.getByLabel('Your question').fill('When is the Colosseum tour?');
+      await viewer.getByLabel('Your question').press('Enter');
+      await viewer.locator('.msg.bot strong', { hasText: '10:00' }).waitFor({ timeout: 20000 });
+      const up = upstreamCalls.at(-1);
+      assert.equal(up.headers.get('x-api-key'), 'sk-ant-server-key', 'the server adds the real key');
+      assert.equal(up.headers.get('authorization'), null, 'the phone\'s sign-in token is not passed to Anthropic');
+      assert.match(JSON.stringify(up.body.system), /Colosseum tour/);
+      // Daily limit (3 in this test): two more answers, then the limit message.
+      for (const q of ['Second question?', 'Third question?']) {
+        await viewer.getByLabel('Your question').fill(q);
+        await viewer.getByLabel('Your question').press('Enter');
+        await viewer.locator('.msg.bot').nth(upstreamCalls.length - 1).waitFor({ timeout: 20000 });
+        await viewer.locator('#chat-send:not([disabled])').waitFor();
+      }
+      await viewer.getByLabel('Your question').fill('Fourth question?');
+      await viewer.getByLabel('Your question').press('Enter');
+      await viewer.getByText(/this phone has used today's 3 AI requests/).waitFor({ timeout: 20000 });
+      assert.equal(upstreamCalls.length, 3);
+      await viewer.shot('03-shared-ai');
+      await viewer.locator('#sheet').getByRole('button', { name: 'Close' }).click();
     });
 
     await check('viewer can remove the trip from their phone only', async () => {

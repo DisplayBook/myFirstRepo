@@ -308,6 +308,13 @@ const cloud = {
 
 export const backendFor = (kind) => (kind === 'cloud' ? cloud : local);
 
+/** This phone's Firebase sign-in token (refreshed automatically), for the trip's AI server. */
+export async function idToken() {
+  const { auth, signedIn } = await loadCloud();
+  await Promise.race([signedIn, new Promise((_, no) => setTimeout(() => no(new Error('AI features need an internet connection')), 10000))]);
+  return auth.currentUser.getIdToken();
+}
+
 /** Copy a device-only trip into shared sync (same id), then switch it over. */
 export async function moveToCloud(id) {
   const snap = await local.snapshot(id);
