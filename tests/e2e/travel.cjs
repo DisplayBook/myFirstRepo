@@ -143,7 +143,11 @@ async function main() {
       await page.locator('.leg').first().getByText(/About \d+ min drive/).waitFor();
       assert.equal(await page.locator('.leg').count(), 2, 'hotel → MoMA and MoMA → hotel');
       const href = await page.locator('.leg-go').first().getAttribute('href');
-      assert.match(href, /^https:\/\/maps\.apple\.com\/\?saddr=40\.7496,-73\.9911&daddr=40\.7614,-73\.9776/);
+      assert.equal(href, 'https://www.google.com/maps/dir/?api=1&origin=40.7496%2C-73.9911&destination=40.7614%2C-73.9776&travelmode=driving');
+      // Each tile with a place has Directions from the phone's current location (no origin).
+      const go = page.locator('.ev', { hasText: 'MoMA' }).locator('.ev-go a');
+      assert.equal(await go.textContent(), '🧭 Directions to Museum of Modern Art');
+      assert.equal(await go.getAttribute('href'), 'https://www.google.com/maps/dir/?api=1&destination=40.7614%2C-73.9776');
       await page.locator('.next').getByText('Next up · in 1 h').waitFor();
       await shot(page, '03-today');
     });
@@ -482,6 +486,8 @@ async function main() {
       await fl.getByRole('button', { name: /Check flight status/ }).click();
       await fl.getByText('🟠 Delayed 45 min · departs 09:10').waitFor();
       await fl.getByText('Terminal 5 · Gate B32 · Arrives 12:00 (T7)').waitFor();
+      const colors = await fl.locator('.live').evaluate((el) => [getComputedStyle(el.querySelector('strong')).color, getComputedStyle(el.querySelector('span.small')).color]);
+      assert.notEqual(colors[0], colors[1], 'only the status heading is coloured');
       await fl.getByText(/FlightAware · checked just now/).waitFor();
       const fc = calls[before].body;
       assert.ok(fc.tools.some((t) => t.type === 'web_search_20260209'), 'uses web search');
@@ -633,8 +639,72 @@ async function main() {
       await page.locator('#sheet').waitFor({ state: 'hidden' });
       const tile = page.locator('.ev', { hasText: 'Fly New York JFK' });
       await tile.getByText('Terminal 8').waitFor();
+      assert.equal(await tile.locator('.ev-icon').textContent(), '🛫', 'take-off icon on departure');
       await page.goto(`${BASE}#/today/2026-12-06`);
       await page.locator('.ev', { hasText: 'Arrive London Heathrow' }).getByText('Terminal 5').waitFor();
+      assert.equal(await page.locator('.ev', { hasText: 'Arrive London Heathrow' }).locator('.ev-icon').textContent(), '🛬', 'landing icon on arrival');
+    });
+
+    await check('swipe left to delete a plan (with undo); a short swipe shows Delete', async () => {
+      await page.goto(`${BASE}#/today/2026-12-05`);
+      const tile = page.locator('.ev', { hasText: 'Fly New York JFK' });
+      await tile.waitFor();
+      const swipeLeft = async (fraction) => {
+        await tile.locator('.ev-btn').scrollIntoViewIfNeeded();
+        const box = await tile.locator('.ev-btn').boundingBox();
+        const y = box.y + box.height / 2;
+        await page.mouse.move(box.x + box.width - 20, y);
+        await page.mouse.down();
+        for (let i = 1; i <= 8; i++) await page.mouse.move(box.x + box.width - 20 - (box.width * fraction * i) / 8, y);
+        await page.mouse.up();
+      };
+      // Short swipe: Delete button shows; tapping the tile closes it without opening the booking.
+      await swipeLeft(0.3);
+      await tile.locator('.swipe-del').waitFor();
+      await shot(page, '18-swipe');
+      await tile.locator('.ev-btn').dispatchEvent('click');
+      assert.equal(await page.locator('#sheet').evaluate((d) => d.open), false, 'tap closes Delete, not opens the booking');
+      await tile.locator('.swipe-del').waitFor({ state: 'hidden' });
+      // Short swipe, then tap Delete; Undo brings it back.
+      await swipeLeft(0.3);
+      await tile.locator('.swipe-del').waitFor();
+      await tile.locator('.swipe-del').dispatchEvent('click');
+      await page.getByText('Deleted BA 178').waitFor();
+      await tile.waitFor({ state: 'detached' });
+      await page.getByRole('button', { name: 'Undo' }).click();
+      await tile.waitFor();
+      // Long swipe deletes straight away (the whole booking: the arrival goes too).
+      await swipeLeft(0.8);
+      await page.getByText('Deleted BA 178').waitFor();
+      await tile.waitFor({ state: 'detached' });
+      await page.goto(`${BASE}#/today/2026-12-06`);
+      assert.equal(await page.locator('.ev', { hasText: 'Arrive London Heathrow (LHR)' }).count(), 0);
+      // A plain tap still opens a booking.
+      await page.goto(`${BASE}#/today/2026-12-02`);
+      await page.locator('.ev .ev-btn').first().click();
+      await page.locator('#item-form').waitFor();
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+    });
+
+    await check('directions: Google Maps by default, Apple Maps as a setting; in booking forms too', async () => {
+      await page.goto(`${BASE}#/today/2026-12-01`);
+      // No directions for an arrival; the hotel check-in has them.
+      assert.equal(await page.locator('.ev', { hasText: 'Arrive John F. Kennedy' }).locator('.ev-go').count(), 0);
+      const hotel = page.locator('.ev', { hasText: 'Check in · Hotel Penn' });
+      assert.equal(await hotel.locator('.ev-go a').getAttribute('href'), 'https://www.google.com/maps/dir/?api=1&destination=40.7496%2C-73.9911');
+      // In the booking form, next to the address.
+      await hotel.locator('.ev-btn').click();
+      assert.equal(await page.locator('.place-field', { hasText: 'Address' }).getByRole('link', { name: /Directions/ }).getAttribute('href'),
+        'https://www.google.com/maps/dir/?api=1&destination=40.7496%2C-73.9911');
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+      // Switch to Apple Maps.
+      await page.goto(`${BASE}#/trip`);
+      await page.getByLabel('Directions open in').selectOption('apple');
+      await page.goto(`${BASE}#/today/2026-12-01`);
+      assert.equal(await hotel.locator('.ev-go a').getAttribute('href'), 'https://maps.apple.com/?daddr=40.7496%2C-73.9911');
+      await shot(page, '19-directions');
+      await page.goto(`${BASE}#/trip`);
+      await page.getByLabel('Directions open in').selectOption('google');
     });
 
     await check('layout fits a phone screen (no sideways scroll)', async () => {
