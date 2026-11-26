@@ -439,3 +439,40 @@ test('chat: sources from web citations, answer text joined', () => {
   assert.deepEqual(sourcesFrom(content), [{ url: 'https://weather.example/nyc', title: 'NYC weather' }]);
   assert.equal(answerText(content), 'It is sunny.');
 });
+
+// ---------- ideas from the chat ----------
+import { placesFrom, isSavedIdea } from '../../travel-planner/js/chat.js';
+import { PLACES_TOOL } from '../../travel-planner/js/ai.js';
+
+test('chat places: validated, cleaned and de-duplicated', () => {
+  const content = [
+    { type: 'text', text: 'Try these.' },
+    { type: 'tool_use', id: 't1', name: 'report_places', input: { places: [
+      { name: '  Joe\'s Pizza ', category: 'restaurant', why: 'Classic slice', when: 'Lunch', address: '1435 Broadway' },
+      { name: "joe's pizza", category: 'restaurant', why: 'dup', when: '', address: '' },
+      { name: 'Mystery', category: 'spaceship', why: 42, when: null, address: 'x'.repeat(500) },
+      { name: '', category: 'cafe' },
+      null,
+    ] } },
+  ];
+  const p = placesFrom(content);
+  assert.equal(p.length, 2);
+  assert.deepEqual(p[0], { name: "Joe's Pizza", category: 'restaurant', why: 'Classic slice', when: 'Lunch', address: '1435 Broadway' });
+  assert.equal(p[1].category, 'other');
+  assert.equal(p[1].why, '');
+  assert.equal(p[1].address.length, 200);
+  assert.deepEqual(placesFrom([{ type: 'text', text: 'no places' }]), []);
+  assert.deepEqual(placesFrom([{ type: 'tool_use', name: 'report_places', input: { places: 'nope' } }]), []);
+  assert.ok(isSavedIdea([{ name: "Joe's Pizza" }], "JOE'S PIZZA"));
+  assert.ok(!isSavedIdea([], 'x'));
+  // The tool passes the AI server's allow-list (name report_*, no type) and is strict.
+  assert.match(PLACES_TOOL.name, /^report_[a-z_]+$/);
+  assert.equal(PLACES_TOOL.type, undefined);
+  assert.equal(PLACES_TOOL.strict, true);
+});
+
+test('chat context lists saved ideas', () => {
+  const ctx = buildTripContext({ meta: { name: 'NYC', ideas: [{ id: 'i1', name: 'Top of the Rock', category: 'attraction', address: '30 Rockefeller Plaza', why: 'Great views' }] }, items: [] });
+  assert.match(ctx, /## Saved ideas[\s\S]*Top of the Rock \[attraction\], 30 Rockefeller Plaza — Great views/);
+  assert.match(buildTripContext({ meta: {}, items: [] }), /## Saved ideas[^\n]*\n\(none\)/);
+});
