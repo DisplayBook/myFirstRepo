@@ -427,3 +427,44 @@ export function guessTime(when = '') {
   if (/morning/.test(w)) return '10:00';
   return '10:00';
 }
+
+// ---------- trip chat ----------
+
+/**
+ * Ask a question about the trip. `history` is [{role, text}] of earlier turns;
+ * `context` is the trip as text. Streams the answer through onText(fullTextSoFar).
+ * Resolves the final message content (text blocks carry web citations).
+ */
+export async function askTrip(apiKey, { system, context, history, question, onText, signal }) {
+  const client = await makeClient(apiKey);
+  const messages = [
+    ...history.map((m) => ({ role: m.role, content: m.text })),
+    { role: 'user', content: question },
+  ];
+  let soFar = '';
+  const content = [];
+  for (let i = 0; i < 4; i++) {
+    const stream = client.beta.messages.stream({
+      model: MODEL,
+      max_tokens: 16000,
+      betas: ['server-side-fallback-2026-07-01'],
+      fallbacks: 'default',
+      output_config: { effort: 'medium' },
+      // The trip data is long and the same on every turn: cache it.
+      system: [
+        { type: 'text', text: system },
+        { type: 'text', text: `# Trip data\n\n${context}`, cache_control: { type: 'ephemeral' } },
+      ],
+      tools: [{ ...WEB_SEARCH, max_uses: 3 }],
+      messages,
+    }, { signal });
+    stream.on('text', (delta) => { soFar += delta; onText?.(soFar); });
+    const message = await stream.finalMessage();
+    if (message.stop_reason === 'refusal') throw new Error('Claude declined to answer that.');
+    content.push(...message.content);
+    if (message.stop_reason !== 'pause_turn') return content;
+    // The server-side search loop paused: send the turn back so it can continue.
+    messages.push({ role: 'assistant', content: message.content });
+  }
+  return content;
+}

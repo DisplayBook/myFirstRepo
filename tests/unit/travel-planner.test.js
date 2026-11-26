@@ -386,3 +386,56 @@ test('day summary: suggestion times', () => {
   assert.equal(guessTime('Breakfast'), '08:30');
   assert.equal(guessTime(''), '10:00');
 });
+
+// ---------- trip chat ----------
+import { buildTripContext, renderMarkdown, sourcesFrom, answerText } from '../../travel-planner/js/chat.js';
+
+test('chat: trip context includes bookings, refs, payments, budget and document text', () => {
+  const its = [
+    { ...hotel, ref: 'HP-778', cost: 600, currency: 'GBP', deposit: 100, balanceDue: '2026-11-28', notes: 'Late check-in arranged' },
+    { ...flight, ref: 'XK9P2L', cost: 480, currency: 'GBP', paid: true },
+    moma,
+  ];
+  const ctx = buildTripContext({
+    meta: { name: 'NYC', currency: 'GBP', budget: 2000 }, items: its,
+    files: [{ id: 'f1', itemId: 'h1', name: 'confirmation.pdf', text: 'Hotel Penn\nConfirmation HP-778\nBreakfast included' }],
+    now: '2026-11-26T10:00', live: { f1x: 'ignored', f1: 'delayed' },
+  });
+  assert.match(ctx, /Trip name: NYC/);
+  assert.match(ctx, /Day 1, Tue 1 Dec 2026-12-01:/);
+  assert.match(ctx, /booking ref HP-778/);
+  assert.match(ctx, /deposit £100\.00 paid, £500\.00 still due by 2026-11-28/);
+  assert.match(ctx, /paid in full/);
+  assert.match(ctx, /notes: Late check-in arranged/);
+  assert.match(ctx, /Planned spend £1,080\.00; paid £580\.00; still to pay £500\.00; budget £2,000\.00, £920\.00 left/);
+  assert.match(ctx, /Bookings without a cost: MoMA/);
+  assert.match(ctx, /confirmation\.pdf \(for Hotel Penn\)/);
+  assert.match(ctx, /Text: Hotel Penn \/ Confirmation HP-778 \/ Breakfast included/);
+  assert.match(ctx, /current local date and time: 2026-11-26 10:00/);
+});
+
+test('chat: markdown is rendered safely', () => {
+  assert.equal(renderMarkdown('Hi **there** and *you*'), '<p>Hi <strong>there</strong> and <em>you</em></p>');
+  assert.equal(renderMarkdown('- one\n- two\n\n1. a\n2. b'), '<ul><li>one</li><li>two</li></ul><ol><li>a</li><li>b</li></ol>');
+  assert.equal(renderMarkdown('<img src=x onerror=alert(1)>'), '<p>&lt;img src=x onerror=alert(1)&gt;</p>');
+  assert.equal(renderMarkdown('[ok](https://a.com/x) [bad](javascript:alert(1))'),
+    '<p><a href="https://a.com/x" target="_blank" rel="noopener">ok</a> [bad](javascript:alert(1))</p>');
+  // A quote in a URL stays escaped inside the attribute, so it can't add attributes.
+  const q = renderMarkdown('[x](https://a.com/"onmouseover=y)');
+  assert.ok(!q.includes('" onmouseover') && !q.includes('"onmouseover'), q);
+});
+
+test('chat: sources from web citations, answer text joined', () => {
+  const content = [
+    { type: 'server_tool_use', id: 's1', name: 'web_search', input: {} },
+    { type: 'text', text: 'It is ', citations: null },
+    { type: 'text', text: 'sunny', citations: [
+      { type: 'web_search_result_location', url: 'https://weather.example/nyc', title: 'NYC weather' },
+      { type: 'web_search_result_location', url: 'https://weather.example/nyc', title: 'dup' },
+      { type: 'web_search_result_location', url: 'http://insecure.example', title: 'no' },
+    ] },
+    { type: 'text', text: '.' },
+  ];
+  assert.deepEqual(sourcesFrom(content), [{ url: 'https://weather.example/nyc', title: 'NYC weather' }]);
+  assert.equal(answerText(content), 'It is sunny.');
+});

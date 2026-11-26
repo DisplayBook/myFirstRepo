@@ -67,9 +67,9 @@ p { margin: .4rem 0; }
   -webkit-backdrop-filter: saturate(1.4) blur(12px);
   border-bottom: 1px solid var(--line);
 }
-.trip-switch { color: var(--text); text-decoration: none; font-weight: 650; min-height: 36px; display: inline-flex; align-items: center; max-width: 60%; }
+.trip-switch { color: var(--text); text-decoration: none; font-weight: 650; min-height: 36px; display: inline-flex; align-items: center; min-width: 0; flex: 1 1 auto; }
 .trip-switch #trip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sync { font-size: .78rem; padding: 3px 10px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.sync { font-size: .78rem; padding: 3px 10px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46vw; }
 .sync.ok { color: var(--ok); }
 .sync.ok::before { content: "● "; }
 .sync.warn { color: var(--warn); background: var(--warn-bg); }
@@ -302,6 +302,29 @@ fieldset.plain:disabled .place-quick, fieldset.plain:disabled .place-chosen .lin
 .idea-body { display: grid; gap: 2px; min-width: 0; }
 .idea-actions { display: flex; gap: 14px; align-items: center; }
 .idea-actions .link { padding: 4px 0; min-height: 32px; }
+
+/* ---------- trip chat ---------- */
+.topbar-right { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.chat-btn { width: 40px; height: 40px; font-size: 1.15rem; }
+.chat { display: flex; flex-direction: column; min-height: min(78dvh, 720px); }
+.chat-log { list-style: none; margin: 0; padding: 4px 0; display: grid; gap: 10px; align-content: start; flex: 1; overflow-y: auto; }
+.msg { display: flex; }
+.msg.me { justify-content: flex-end; }
+.bubble { max-width: 88%; padding: 10px 14px; border-radius: 16px; background: var(--bg); border: 1px solid var(--line); overflow-wrap: anywhere; }
+.msg.me .bubble { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); border-bottom-right-radius: 4px; white-space: pre-wrap; }
+.msg.bot .bubble { border-bottom-left-radius: 4px; }
+.bubble p { margin: 0 0 6px; }
+.bubble p:last-child { margin-bottom: 0; }
+.bubble ul, .bubble ol { margin: 4px 0 6px; padding-left: 1.2em; }
+.bubble code { font-size: .9em; background: var(--chip); padding: 1px 4px; border-radius: 4px; }
+.sources { margin-top: 6px; border-top: 1px dashed var(--line); padding-top: 6px; }
+.typing { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .4; } }
+.chat-starters { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0; }
+.chat-starters .chip { white-space: normal; text-align: left; min-height: 36px; padding: 6px 12px; }
+.chat-input { display: flex; gap: 8px; align-items: flex-end; position: sticky; bottom: 0; background: var(--card); padding: 8px 0 2px; }
+.chat-input textarea { flex: 1; resize: none; min-height: 44px; max-height: 140px; }
+.chat-note { margin: 2px 0 0; }
 
 /* ---------- plan ---------- */
 .plan-day { margin: 18px 0; }

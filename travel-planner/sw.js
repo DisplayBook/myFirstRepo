@@ -1,7 +1,7 @@
 // Trip Planner service worker: offline cache for the app shell. Bump VERSION after changing files.
 // Trip data is not handled here: shared trips are cached by Firestore itself,
 // device-only trips live in localStorage.
-const VERSION = 'trips-v1.7.0';
+const VERSION = 'trips-v1.8.0';
 const SHELL = [
   './',
   './index.html',
@@ -15,6 +15,7 @@ const SHELL = [
   './js/files.js',
   './js/budget.js',
   './js/ai.js',
+  './js/chat.js',
   './vendor/anthropic/anthropic-sdk.js',
   './js/config.js',
   './vendor/leaflet/leaflet.js',
