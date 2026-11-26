@@ -383,6 +383,10 @@ async function main() {
           if (report === 'report_day_brief' && body.messages.length === 1) { await msg(search, 'pause_turn'); return; }
           const inputs = {
             report_flight_status: { found: true, status: 'delayed', delayMinutes: 45, depScheduled: '08:25', depEstimated: '09:10', arrScheduled: '11:20', arrEstimated: '12:00', depTerminal: '5', depGate: 'B32', arrTerminal: '7', baggage: '', note: 'Late inbound aircraft.', source: 'FlightAware' },
+            report_flight_details: { found: true, airline: 'British Airways', flightNumber: 'BA 178',
+              from: { name: 'New York JFK (JFK)', search: 'JFK Airport, New York', terminal: 'Terminal 8', time: '19:00', date: '2026-12-05' },
+              to: { name: 'London Heathrow (LHR)', search: 'Heathrow Airport, London', terminal: 'T5', time: '07:05', date: '' },
+              aircraft: 'Boeing 777-300ER', note: '', source: 'FlightAware' },
             report_road_conditions: { level: 'minor', extraMinutes: 15, summary: 'Lane closures on I-95 near New Haven.', issues: [{ road: 'I-95', issue: 'Lane closures near New Haven', when: '10:00–15:00' }] },
             report_day_brief: { overview: 'A relaxed day: MoMA in the morning, then pick up the car.', weather: 'Cold and sunny, 4°C.', tips: ['Book MoMA tickets online to skip the queue.'], suggestions: [
               { name: 'Joe\'s Pizza', category: 'restaurant', why: 'Classic slice near Times Square.', when: 'Lunch', address: '1435 Broadway, New York' },
@@ -602,6 +606,35 @@ async function main() {
       page.once('dialog', (d) => d.accept());
       await ideas.getByRole('button', { name: 'Remove' }).click();
       await ideas.getByText(/Save restaurants, activities/).waitFor();
+    });
+
+    await check('add a flight from just the flight number and date', async () => {
+      await page.goto(`${BASE}#/today/2026-12-05`);
+      await page.getByRole('button', { name: 'Add to the plan' }).click();
+      await page.locator('.typegrid').getByRole('button', { name: 'Flight', exact: true }).click();
+      await page.locator('#fl-number').fill('ba178');
+      assert.equal(await page.locator('#fl-date').inputValue(), '2026-12-05', 'date defaults to the day being viewed');
+      await page.getByRole('button', { name: /Find flight/ }).click();
+      await page.getByText('✓ Filled in from FlightAware').waitFor();
+      const lookupCall = calls.at(-1).body;
+      assert.ok(lookupCall.tools.some((t) => t.name === 'report_flight_details'));
+      assert.match(JSON.stringify(lookupCall.messages), /Flight BA 178 on 2026-12-05/);
+      assert.equal(await page.getByLabel('Airline').inputValue(), 'British Airways');
+      assert.equal(await page.getByLabel('Flight number', { exact: true }).inputValue(), 'BA 178');
+      assert.equal(await page.getByLabel('Departs').inputValue(), '2026-12-05T19:00');
+      assert.equal(await page.getByLabel('Arrives').inputValue(), '2026-12-06T07:05', 'lands the next day');
+      assert.equal(await page.getByLabel('Departure terminal').inputValue(), '8');
+      assert.equal(await page.getByLabel('Arrival terminal').inputValue(), '5');
+      await page.locator('.place-field', { hasText: 'From airport' }).getByText('New York JFK (JFK)').waitFor();
+      await page.locator('.place-field', { hasText: 'To airport' }).getByText('London Heathrow (LHR)').waitFor();
+      assert.match(await page.getByLabel('Notes').inputValue(), /Boeing 777-300ER/);
+      await shot(page, '17-flight-lookup');
+      await page.locator('#save-item').click();
+      await page.locator('#sheet').waitFor({ state: 'hidden' });
+      const tile = page.locator('.ev', { hasText: 'Fly New York JFK' });
+      await tile.getByText('Terminal 8').waitFor();
+      await page.goto(`${BASE}#/today/2026-12-06`);
+      await page.locator('.ev', { hasText: 'Arrive London Heathrow' }).getByText('Terminal 5').waitFor();
     });
 
     await check('layout fits a phone screen (no sideways scroll)', async () => {

@@ -476,3 +476,53 @@ test('chat context lists saved ideas', () => {
   assert.match(ctx, /## Saved ideas[\s\S]*Top of the Rock \[attraction\], 30 Rockefeller Plaza — Great views/);
   assert.match(buildTripContext({ meta: {}, items: [] }), /## Saved ideas[^\n]*\n\(none\)/);
 });
+
+// ---------- flight lookup ----------
+import { formatFlightNo } from '../../travel-planner/js/logic.js';
+import { FLIGHT_LOOKUP_TOOL, normalizeFlightLookup } from '../../travel-planner/js/ai.js';
+
+test('flight lookup: flight numbers are tidied', () => {
+  assert.equal(formatFlightNo('ba117'), 'BA 117');
+  assert.equal(formatFlightNo('BA-0117'), 'BA 117');
+  assert.equal(formatFlightNo('u2 8123'), 'U2 8123');
+  assert.equal(formatFlightNo('EZY8123'), 'EZY 8123');
+  assert.equal(formatFlightNo('w6123'), 'W6 123');
+  assert.equal(formatFlightNo(' BA '), 'BA');
+});
+
+test('flight lookup: report tool is strict and passes the AI server allow-list', () => {
+  const check = (s) => {
+    if (s.type === 'object') {
+      assert.equal(s.additionalProperties, false);
+      assert.deepEqual([...s.required].sort(), Object.keys(s.properties).sort());
+      Object.values(s.properties).forEach(check);
+    } else if (s.type === 'array') check(s.items);
+  };
+  check(FLIGHT_LOOKUP_TOOL.input_schema);
+  assert.equal(FLIGHT_LOOKUP_TOOL.strict, true);
+  assert.match(FLIGHT_LOOKUP_TOOL.name, /^report_[a-z_]+$/);
+});
+
+test('flight lookup: results become form fields', () => {
+  const raw = {
+    found: true, airline: 'British Airways', flightNumber: 'ba 178',
+    from: { name: 'New York JFK (JFK)', search: 'JFK Airport, New York', terminal: 'Terminal 8', time: '19:00', date: '2026-12-05' },
+    to: { name: 'London Heathrow (LHR)', search: 'Heathrow Airport, London', terminal: 'T5', time: '7:05', date: '' },
+    aircraft: 'Boeing 777-300ER', note: '', source: 'FlightAware',
+  };
+  assert.deepEqual(normalizeFlightLookup(raw, '2026-12-05'), {
+    provider: 'British Airways', number: 'BA 178',
+    from: { name: 'New York JFK (JFK)', search: 'JFK Airport, New York' },
+    to: { name: 'London Heathrow (LHR)', search: 'Heathrow Airport, London' },
+    start: '2026-12-05T19:00', end: '2026-12-06T07:05', terminal: '8', arrTerminal: '5',
+    notes: 'Aircraft: Boeing 777-300ER',
+  });
+  // An explicit arrival date wins (e.g. crossing the date line "backwards").
+  const back = normalizeFlightLookup({ ...raw, from: { ...raw.from, date: '2026-12-05', time: '17:00' }, to: { ...raw.to, date: '2026-12-05', time: '10:30' } }, '2026-12-05');
+  assert.equal(back.end, '2026-12-05T10:30');
+  // TBA terminals are dropped; not found gives nothing.
+  assert.equal(normalizeFlightLookup({ ...raw, from: { ...raw.from, terminal: 'TBA' } }, '2026-12-05').terminal, undefined);
+  assert.equal(normalizeFlightLookup({ ...raw, to: { ...raw.to, terminal: '2E' } }, '2026-12-05').arrTerminal, '2E');
+  assert.deepEqual(normalizeFlightLookup({ ...raw, found: false }, '2026-12-05'), {});
+  assert.deepEqual(normalizeFlightLookup(null, '2026-12-05'), {});
+});

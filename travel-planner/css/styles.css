@@ -341,6 +341,16 @@ fieldset.plain:disabled .place-quick, fieldset.plain:disabled .place-chosen .lin
 .danger-link { color: var(--bad) !important; }
 .ideas-list li { display: flex; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
 
+/* ---------- flight lookup ---------- */
+.lookup { display: grid; gap: 10px; padding: 12px; border-radius: 14px; background: color-mix(in srgb, var(--accent) 8%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.lookup-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.lookup label { display: grid; gap: 6px; font-size: .9rem; font-weight: 600; color: var(--muted); }
+.lookup #fl-number { text-transform: uppercase; }
+.lookup #fl-number::placeholder { text-transform: none; }
+.lookup p { margin: 0; }
+.lookup-wrap summary { cursor: pointer; color: var(--accent); font-weight: 600; min-height: 40px; display: flex; align-items: center; }
+.lookup-off { margin: 0; }
+
 /* ---------- plan ---------- */
 .plan-day { margin: 18px 0; }
 .plan-head { display: flex; justify-content: space-between; align-items: center; color: var(--text); text-decoration: none; font-weight: 700; padding: 6px 2px; min-height: 40px; border-bottom: 1px solid var(--line); }

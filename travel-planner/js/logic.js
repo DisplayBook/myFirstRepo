@@ -15,9 +15,11 @@ export const TYPES = {
       { key: 'from', label: 'From airport', kind: 'place', required: true },
       { key: 'to', label: 'To airport', kind: 'place', required: true },
       { key: 'start', label: 'Departs (local time)', kind: 'datetime', required: true },
+      { key: 'terminal', label: 'Departure terminal', kind: 'text', placeholder: 'e.g. 5' },
       { key: 'end', label: 'Arrives (local time)', kind: 'datetime' },
+      { key: 'arrTerminal', label: 'Arrival terminal', kind: 'text', placeholder: 'e.g. 7' },
       { key: 'ref', label: 'Booking reference', kind: 'text' },
-      { key: 'seat', label: 'Seats / terminal', kind: 'text' },
+      { key: 'seat', label: 'Seats', kind: 'text' },
       { key: 'cost', label: 'Cost', kind: 'money' },
       { key: 'paid', label: 'Payment', kind: 'payment' },
       { key: 'notes', label: 'Notes', kind: 'textarea' },
@@ -493,7 +495,7 @@ export function toICS(tripName, items, bufferPct = 0, stamp = '20260101T000000Z'
       lines.push('BEGIN:VEVENT', `UID:${it.id}${suffix}@trip-planner`, `DTSTAMP:${stamp}`,
         `DTSTART:${icsDT(start)}`, `DTEND:${icsDT(e)}`, fold(`SUMMARY:${icsEsc(title)}`));
       if (place?.name) lines.push(fold(`LOCATION:${icsEsc(place.name)}`));
-      const desc = [it.ref && `Ref: ${it.ref}`, it.seat && `Seat: ${it.seat}`, it.notes].filter(Boolean).join('\n');
+      const desc = [it.ref && `Ref: ${it.ref}`, it.terminal && `Terminal ${it.terminal}`, it.arrTerminal && `Arrival terminal ${it.arrTerminal}`, it.seat && `Seat: ${it.seat}`, it.notes].filter(Boolean).join('\n');
       if (desc) lines.push(fold(`DESCRIPTION:${icsEsc(desc)}`));
       lines.push('END:VEVENT');
     };
@@ -510,3 +512,11 @@ export function toICS(tripName, items, bufferPct = 0, stamp = '20260101T000000Z'
   lines.push('END:VCALENDAR');
   return lines.join('\r\n') + '\r\n';
 }
+
+/** "ba117" / "BA-117" / "ba 0117" → "BA 117"; anything else is just trimmed and upper-cased. */
+export function formatFlightNo(s) {
+  const t = String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const m = t.match(/^([A-Z0-9]{2}[A-Z]?)(\d{1,4}[A-Z]?)$/) && t.match(/^([A-Z]{2,3}|[A-Z]\d|\d[A-Z])(\d{1,4}[A-Z]?)$/);
+  return m ? `${m[1]} ${m[2].replace(/^0+(?=\d)/, '')}` : String(s || '').trim().toUpperCase();
+}
+

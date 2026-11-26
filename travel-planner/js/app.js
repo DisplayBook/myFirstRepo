@@ -3,7 +3,7 @@ import {
   TYPES, uid, isTripId, datePart, timePart, addDays, daysBetween, dateRange, localDate, localDateTime,
   fmtDate, fmtTime, fmtDuration, fmtDistance, fmtUntil, diffMinutes, addMinutes, hasCoords, shortName,
   haversineKm, greatCircle, decodePolyline, knownPlaces, itemTitle, driveMinutes, itemEnd, validateItem,
-  cleanItem, eventsForItem, dayAgenda, tripSpan, defaultDay, driveLegs, legStatus, hotelForNight, toICS,
+  cleanItem, eventsForItem, dayAgenda, tripSpan, defaultDay, driveLegs, legStatus, hotelForNight, toICS, formatFlightNo,
 } from './logic.js';
 import * as store from './store.js';
 import { aiProxyUrl } from './config.js';
@@ -11,7 +11,7 @@ import { searchPlaces, driveRoute, cachedRoute, currentPosition, routeRoads } fr
 import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount, payment } from './budget.js';
-import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime, askTrip } from './ai.js';
+import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime, askTrip, flightDetails, normalizeFlightLookup } from './ai.js';
 import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea } from './chat.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -246,7 +246,9 @@ function eventMeta(ev) {
     bits.push(`return ${fmtDate(datePart(it.end))} ${t12(timePart(it.end))}${back ? ` at ${back}` : ''}`);
   }
   if (it.ref && ['depart', 'checkin', 'pickup', 'activity'].includes(ev.kind)) bits.push(`Ref ${it.ref}`);
-  if (it.seat && ev.kind === 'depart') bits.push(it.seat);
+  if (it.terminal && ev.kind === 'depart') bits.push(`Terminal ${it.terminal}`);
+  if (it.arrTerminal && ev.kind === 'arrive') bits.push(`Terminal ${it.arrTerminal}`);
+  if (it.seat && ev.kind === 'depart') bits.push(`Seats ${it.seat}`);
   if (hasCost(it) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind)) {
     const cur = it.currency || homeCurrency(S.meta);
     const pay = payment(it);
@@ -1255,11 +1257,12 @@ function defaultTimes(type) {
   }
 }
 
-function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], onSaved } = {}) {
+function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], onSaved, lookup = null } = {}) {
   const def = TYPES[type];
   // Pre-filled (scanned) bookings keep only what was read; blank forms get sensible default times.
   const base = Object.keys(prefill).length ? {} : defaultTimes(type);
-  const draft = existing ? JSON.parse(JSON.stringify(existing)) : { type, id: uid(16), ...base, ...prefill };
+  // When editing, `prefill` holds changes not saved yet (e.g. a flight lookup).
+  const draft = existing ? { ...JSON.parse(JSON.stringify(existing)), ...prefill } : { type, id: uid(16), ...base, ...prefill };
   const ro = !canEdit();
   const fieldHtml = def.fields.map((f) => {
     const v = draft[f.key] ?? '';
@@ -1302,6 +1305,7 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
     <div class="sheet-head"><h2><span aria-hidden="true">${def.icon}</span> ${esc(ro ? (existing ? itemTitle(existing) : def.label) : `${existing ? 'Edit' : 'Add'} ${def.label.toLowerCase()}`)}</h2>
       <button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
     ${ro ? '<p class="muted small">👁 View only</p>' : ''}
+    ${type === 'flight' && !ro ? flightLookupHtml(draft, existing, lookup) : ''}
     <fieldset class="plain form" ${ro ? 'disabled' : ''}>
     ${fieldHtml}
     ${type === 'drive' ? '<div class="routebox" id="routebox" role="status" aria-live="polite"></div>' : ''}
@@ -1412,6 +1416,53 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
 
   // New bookings keep picked files until Save; existing ones upload straight away.
   const pending = prefillDocs.map((p) => ({ ...p, id: uid(8) }));
+
+  // Flight lookup: flight number + date → fill in airports, times and terminals.
+  const fl = $('#flight-lookup', form);
+  if (fl) {
+    fl.onsubmit = null;
+    $('#fl-go', fl).onclick = async () => {
+      const number = formatFlightNo($('#fl-number', fl).value);
+      const date = $('#fl-date', fl).value;
+      const status = $('#fl-status', fl);
+      if (!number || !/\d/.test(number)) { status.textContent = 'Enter a flight number, e.g. BA 117.'; status.className = 'error small'; return; }
+      if (!date) { status.textContent = 'Choose the date of the flight.'; status.className = 'error small'; return; }
+      $('#fl-go', fl).disabled = true;
+      status.className = 'small';
+      status.textContent = `⏳ Looking up ${number} on ${fmtDate(date)}… (up to a minute)`;
+      try {
+        const raw = await flightDetails(await aiAuth(), { number, date, now: localDateTime() });
+        const found = normalizeFlightLookup(raw, date);
+        if (!found.start) {
+          status.className = 'error small';
+          status.textContent = `Couldn't find ${number} on ${fmtDate(date)}. Check the number and date, or fill in the details below.`;
+          $('#fl-go', fl).disabled = false;
+          return;
+        }
+        status.textContent = 'Finding the airports on the map…';
+        for (const k of ['from', 'to']) {
+          if (!found[k]) continue;
+          try {
+            const [hit] = await searchPlaces(found[k].search || found[k].name);
+            found[k] = hit ? { name: found[k].name, lat: hit.lat, lon: hit.lon } : { name: found[k].name };
+          } catch { found[k] = { name: found[k].name }; }
+        }
+        readInputs();
+        const keep = Object.fromEntries(Object.entries(draft).filter(([k]) => !['type', 'id'].includes(k)));
+        const merged = { ...keep, ...found, number: found.number || number };
+        if (found.notes && keep.notes && !keep.notes.includes(found.notes)) merged.notes = `${keep.notes}\n${found.notes}`;
+        openItemForm('flight', existing, existing ? merged : { ...merged, id: draft.id }, {
+          docs: pending.map(({ id, ...p }) => p), onSaved,
+          lookup: { ok: true, source: raw.source, number: merged.number, date },
+        });
+      } catch (err) {
+        status.className = 'error small';
+        status.textContent = friendlyError(err);
+        $('#fl-go', fl).disabled = false;
+      }
+    };
+    $('#fl-number', fl).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#fl-go', fl).click(); } });
+  }
   const docs = mountDocs($('#docs'), { itemId: draft.id, pending: existing ? null : pending });
 
   if (type === 'drive') {
@@ -1637,6 +1688,28 @@ function showScanResults() {
     const first = ready[0]?.d.start;
     if (first && parseRoute().name !== 'plan') go(`#/today/${datePart(first)}`);
   };
+}
+
+// ---------- flight lookup (in the flight form) ----------
+
+function flightLookupHtml(draft, existing, lookup) {
+  if (!aiOn()) {
+    return `<p class="muted small lookup-off">Tip: with AI features on, you can just enter the flight number and date and the rest is filled in. <a href="#/trip">Set up</a></p>`;
+  }
+  const number = lookup?.number || draft.number || '';
+  const date = lookup?.date || datePart(draft.start) || S.viewDay || localDate();
+  const box = `<div class="lookup" id="flight-lookup">
+      <div class="lookup-row">
+        <label><span>Look up flight number</span><input id="fl-number" value="${esc(number)}" placeholder="e.g. BA 117" autocomplete="off" autocapitalize="characters" enterkeyhint="search"></label>
+        <label><span>Flight date</span><input id="fl-date" type="date" value="${esc(date)}"></label>
+      </div>
+      <button type="button" class="btn" id="fl-go">🔎 Find flight</button>
+      <p id="fl-status" class="${lookup?.ok ? 'ok' : 'muted'} small" role="status" aria-live="polite">${lookup?.ok
+        ? `✓ Filled in${lookup.source ? ` from ${esc(lookup.source)}` : ''}. Check the details below, then Save.`
+        : 'Fills in the airline, airports, times and terminals from the web.'}</p>
+    </div>`;
+  if (existing && !lookup) return `<details class="lookup-wrap"><summary>🔎 Update from the flight number</summary>${box}</details>`;
+  return box;
 }
 
 // ---------- trip chat ----------
