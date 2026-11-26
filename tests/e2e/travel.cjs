@@ -51,6 +51,7 @@ async function main() {
   if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
   const shot = async (page, name) => SHOTS && page.screenshot({ path: path.join(SHOTS, `${name}.png`) });
   let routeCalls = 0;
+  const calls = []; // requests to the (mocked) Claude API
 
   try {
     const context = await browser.newContext({ ...devices['iPhone 13'], acceptDownloads: true });
@@ -334,7 +335,7 @@ async function main() {
     });
 
     await check('scan a pasted email with Claude: review, add, attach, get text from a photo', async () => {
-      const calls = [];
+      calls.length = 0;
       const blank = { title: '', provider: '', number: '', ref: '', seat: '', start: '', end: '', place: { name: '', search: '' }, from: { name: '', search: '' }, to: { name: '', search: '' }, cost: '', currency: '', paid: false, notes: '' };
       await context.route('https://api.anthropic.com/**', async (route) => {
         const req = route.request();
@@ -342,6 +343,28 @@ async function main() {
         if (req.method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: cors }); return; }
         const body = req.postDataJSON();
         calls.push({ body, headers: await req.allHeaders() });
+        const msg = (content, stop) => route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/json', 'request-id': 'req_test' }, json: {
+          id: `msg_${calls.length}`, type: 'message', role: 'assistant', model: body.model, content, stop_reason: stop, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 10 },
+        } });
+        const report = body.tools?.find((t) => t.name?.startsWith('report_'))?.name;
+        if (report) {
+          const search = [
+            { type: 'server_tool_use', id: `srvtoolu_${calls.length}`, name: 'web_search', input: { query: 'status' } },
+            { type: 'web_search_tool_result', tool_use_id: `srvtoolu_${calls.length}`, content: [] },
+          ];
+          // The day summary first pauses (server-side loop limit), then reports.
+          if (report === 'report_day_brief' && body.messages.length === 1) { await msg(search, 'pause_turn'); return; }
+          const inputs = {
+            report_flight_status: { found: true, status: 'delayed', delayMinutes: 45, depScheduled: '08:25', depEstimated: '09:10', arrScheduled: '11:20', arrEstimated: '12:00', depTerminal: '5', depGate: 'B32', arrTerminal: '7', baggage: '', note: 'Late inbound aircraft.', source: 'FlightAware' },
+            report_road_conditions: { level: 'minor', extraMinutes: 15, summary: 'Lane closures on I-95 near New Haven.', issues: [{ road: 'I-95', issue: 'Lane closures near New Haven', when: '10:00–15:00' }] },
+            report_day_brief: { overview: 'A relaxed day: MoMA in the morning, then pick up the car.', weather: 'Cold and sunny, 4°C.', tips: ['Book MoMA tickets online to skip the queue.'], suggestions: [
+              { name: 'Joe\'s Pizza', category: 'restaurant', why: 'Classic slice near Times Square.', when: 'Lunch', address: '1435 Broadway, New York' },
+              { name: 'Bryant Park Winter Village', category: 'event', why: 'Ice skating close by.', when: 'After 16:00', address: 'Bryant Park, New York' },
+            ] },
+          };
+          await msg([...search, { type: 'tool_use', id: `toolu_${calls.length}`, name: report, input: inputs[report] }], 'tool_use');
+          return;
+        }
         const text = body.output_config?.format
           ? JSON.stringify({ text: '', bookings: [
             { ...blank, type: 'flight', provider: 'British Airways', number: 'BA 178', ref: 'XK9P2L', start: '2026-12-05T19:00', end: '2026-12-06T07:05',
@@ -418,6 +441,54 @@ async function main() {
       assert.ok(!calls.at(-1).body.output_config.format, 'transcription asks for plain text');
       await shot(page, '11-doc-text');
       await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+    });
+
+    await check('Today: live flight status, road delays and the AI day summary', async () => {
+      const before = calls.length;
+      // Flight status (flight was yesterday: still checkable).
+      await page.goto(`${BASE}#/today/2026-12-01`);
+      const fl = page.locator('.ev', { hasText: 'Fly Heathrow Airport' });
+      await fl.getByRole('button', { name: /Check flight status/ }).click();
+      await fl.getByText('🟠 Delayed 45 min · departs 09:10').waitFor();
+      await fl.getByText('Terminal 5 · Gate B32 · Arrives 12:00 (T7)').waitFor();
+      await fl.getByText(/FlightAware · checked just now/).waitFor();
+      const fc = calls[before].body;
+      assert.ok(fc.tools.some((t) => t.type === 'web_search_20260209'), 'uses web search');
+      assert.ok(fc.tools.some((t) => t.name === 'report_flight_status' && t.strict), 'strict report tool');
+      assert.equal(fc.tool_choice.type, 'auto');
+      assert.match(JSON.stringify(fc.messages), /Flight BA 117/);
+      await shot(page, '12-flight-status');
+
+      // Road disruptions for a planned drive.
+      await page.goto(`${BASE}#/today/2026-12-04`);
+      const dr = page.locator('.ev', { hasText: 'Drive to Boston' });
+      await dr.getByRole('button', { name: /Check for delays/ }).click();
+      await dr.getByText('🟠 Some delays possible · allow ~15 min extra').waitFor();
+      await dr.getByText('Lane closures near New Haven').waitFor();
+
+      // Day summary (pauses once, then reports).
+      await page.goto(`${BASE}#/today/2026-12-02`);
+      await page.getByRole('button', { name: '✨ Summarise this day' }).click();
+      await page.getByText('A relaxed day: MoMA in the morning').waitFor();
+      await page.getByText('Cold and sunny, 4°C.').waitFor();
+      await page.getByText('Book MoMA tickets online').waitFor();
+      const brief = calls.filter((c) => c.body.tools?.some((t) => t.name === 'report_day_brief'));
+      assert.equal(brief.length, 2, 'resumed after pause_turn');
+      assert.equal(brief[1].body.messages.length, 2, 'resent with the paused assistant turn');
+      assert.match(JSON.stringify(brief[0].body.messages), /MoMA/, 'the day plan is sent');
+      await shot(page, '13-day-summary');
+      // Add a suggestion to the plan.
+      await page.locator('.brief-ideas li', { hasText: 'Joe\'s Pizza' }).getByRole('button', { name: /Add to plan/ }).click();
+      await page.locator('#item-form').waitFor();
+      assert.equal(await page.getByLabel('What').inputValue(), 'Joe\'s Pizza');
+      assert.equal(await page.getByLabel('Starts').inputValue(), '2026-12-02T12:30');
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
+
+      // Results are kept on the phone.
+      await page.reload();
+      await page.getByText('A relaxed day: MoMA in the morning').waitFor();
+      await page.goto(`${BASE}#/today/2026-12-01`);
+      await page.getByText('🟠 Delayed 45 min · departs 09:10').waitFor();
     });
 
     await check('layout fits a phone screen (no sideways scroll)', async () => {

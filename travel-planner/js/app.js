@@ -6,11 +6,11 @@ import {
   cleanItem, eventsForItem, dayAgenda, tripSpan, defaultDay, driveLegs, legStatus, hotelForNight, toICS,
 } from './logic.js';
 import * as store from './store.js';
-import { searchPlaces, driveRoute, cachedRoute, currentPosition } from './geo.js';
+import { searchPlaces, driveRoute, cachedRoute, currentPosition, routeRoads } from './geo.js';
 import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount, payment } from './budget.js';
-import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError } from './ai.js';
+import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime } from './ai.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -221,6 +221,15 @@ function eventMeta(ev) {
     const sameDay = datePart(it.end) === datePart(it.start);
     bits.push(`arrives ${t12(timePart(it.end))}${sameDay ? '' : ` (${fmtDate(datePart(it.end))})`}`);
   }
+  if (ev.kind === 'checkin' && it.end) {
+    const n = daysBetween(datePart(it.start), datePart(it.end));
+    if (n > 0) bits.push(`${n} night${n === 1 ? '' : 's'} · check out ${fmtDate(datePart(it.end))}`);
+  }
+  if (ev.kind === 'activity' && ev.endAt) bits.push(fmtDuration(diffMinutes(ev.at, ev.endAt)));
+  if (ev.kind === 'pickup' && it.end) {
+    const back = it.to?.name ? shortName(it.to) : shortName(it.from);
+    bits.push(`return ${fmtDate(datePart(it.end))} ${t12(timePart(it.end))}${back ? ` at ${back}` : ''}`);
+  }
   if (it.ref && ['depart', 'checkin', 'pickup', 'activity'].includes(ev.kind)) bits.push(`Ref ${it.ref}`);
   if (it.seat && ev.kind === 'depart') bits.push(it.seat);
   if (hasCost(it) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind)) {
@@ -233,8 +242,9 @@ function eventMeta(ev) {
 
 const docCount = (itemId) => S.files.filter((f) => f.itemId === itemId).length;
 
-function eventRow(ev) {
+function eventRow(ev, { live = false } = {}) {
   const def = TYPES[ev.item.type];
+  const liveBox = live ? liveHtml(ev) : '';
   const time = timePart(ev.at);
   const endT = ev.endAt && ev.kind === 'activity' ? `–${t12(timePart(ev.endAt))}` : '';
   return `<li class="ev" style="--c:${def.color}">
@@ -246,7 +256,7 @@ function eventRow(ev) {
         ${docCount(ev.item.id) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-docs">📎 ${docCount(ev.item.id)} document${docCount(ev.item.id) === 1 ? '' : 's'}</span>` : ''}
         ${ev.item.notes && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-notes">${esc(ev.item.notes)}</span>` : ''}
       </span>
-    </button></li>`;
+    </button>${liveBox}</li>`;
 }
 
 function legRow(leg, i) {
@@ -327,7 +337,7 @@ function renderToday(arg) {
   let rows = '';
   ag.events.forEach((ev, i) => {
     legs.forEach((l, li) => { if (l.index === i) rows += legRow(l, li); });
-    rows += eventRow(ev);
+    rows += eventRow(ev, { live: true });
   });
   legs.forEach((l, li) => { if (l.index === ag.events.length) rows += legRow(l, li); });
 
@@ -348,8 +358,208 @@ function renderToday(arg) {
     ${ctx.length ? `<div class="ctx">${ctx.map((c) => `<span>${c}</span>`).join('')}</div>` : ''}
     ${ag.events.length || legs.length ? `<ol class="timeline">${rows}</ol>` : `<div class="empty"><p>Nothing planned for this day.</p>${canEdit() ? '<button type="button" class="btn" data-add>Add something</button>' : ''}</div>`}
     ${ag.tonight ? `<p class="tonight">🌙 Tonight: <strong>${esc(ag.tonight.title)}</strong>${ag.tonight.place?.name ? ` · ${esc(shortName(ag.tonight.place))}` : ''}</p>` : ''}
-    <p class="hint muted">Drive times are estimates without live traffic, plus ${bufferPct()}% buffer (change in Trip).</p>`;
+    <p class="hint muted">Drive times are estimates without live traffic, plus ${bufferPct()}% buffer (change in Trip).</p>
+    <section class="card brief" id="brief" data-day="${esc(day)}">${briefHtml(day)}</section>`;
   fillLegs(legs, main);
+}
+
+// ---------- live checks & day summary (Claude + web search) ----------
+
+const LIVE_KEY = 'tp:live';
+const liveBusy = new Set();
+const liveErr = new Map();
+function liveGet(k) {
+  try { return JSON.parse(localStorage.getItem(LIVE_KEY))?.[k] || null; } catch { return null; }
+}
+function liveSet(k, data) {
+  try {
+    const all = JSON.parse(localStorage.getItem(LIVE_KEY)) || {};
+    all[k] = { data, at: Date.now() };
+    const keys = Object.keys(all);
+    if (keys.length > 120) keys.sort((a, b) => all[a].at - all[b].at).slice(0, keys.length - 120).forEach((x) => delete all[x]);
+    localStorage.setItem(LIVE_KEY, JSON.stringify(all));
+  } catch { /* storage full: results just aren't kept */ }
+}
+const ago = (t) => {
+  const m = Math.round((Date.now() - t) / 60000);
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
+};
+const liveKey = (kind, it) => (kind === 'flight'
+  ? `flight:${it.id}:${it.number}:${it.start}`
+  : `road:${it.id}:${it.start}:${it.from?.lat},${it.from?.lon}>${it.to?.lat},${it.to?.lon}`);
+
+/** Live box under a flight or drive tile on the Today screen. */
+function liveHtml(ev) {
+  const it = ev.item;
+  const kind = it.type === 'flight' && ev.kind === 'depart' ? 'flight' : it.type === 'drive' ? 'road' : '';
+  if (!kind) return '';
+  const today = localDate();
+  const date = datePart(it.start);
+  const daysAway = daysBetween(today, date);
+  if (daysAway < -1) return '';
+  const wrap = (inner, cls = '') => `<div class="live ${cls}" data-live="${kind}" data-item="${esc(it.id)}">${inner}</div>`;
+  if (kind === 'flight' && !it.number) return wrap('<span class="muted small">Add the flight number to check its live status.</span>');
+  if (!S.settings.aiKey) {
+    return wrap(`<span class="muted small">${kind === 'flight' ? 'Live flight status' : 'Road disruption checks'} need the AI key on this phone. <a href="#/trip">Set up</a></span>`);
+  }
+  const k = liveKey(kind, it);
+  if (liveBusy.has(k)) return wrap(`<span class="small" role="status">⏳ Checking ${kind === 'flight' ? 'flight status' : 'the route'}… (up to a minute)</span>`);
+  const err = liveErr.get(k);
+  const cached = liveGet(k);
+  const btn = (label) => `<button type="button" class="link small" data-live-check="${kind}" data-item="${esc(it.id)}">${label}</button>`;
+  if (kind === 'flight' && daysAway > 2 && !cached) {
+    return wrap(`<span class="muted small">Live status is available from ${esc(fmtDate(addDays(date, -1)))}.</span>`);
+  }
+  if (!cached) {
+    return wrap(`${err ? `<span class="error small">${esc(err)}</span>` : ''}${btn(kind === 'flight' ? '✈️ Check flight status' : '🚧 Check for delays on the route')}`);
+  }
+  const d = cached.data;
+  const foot = `<span class="live-foot">${d.source ? `${esc(d.source)} · ` : ''}checked ${esc(ago(cached.at))} · ${btn('Refresh')}</span>`;
+  if (kind === 'flight') {
+    if (!d.found) return wrap(`<span class="small">No live status found yet. It usually appears closer to departure.</span>${foot}`);
+    const map = {
+      scheduled: ['🟢', 'Scheduled', 'ok'], on_time: ['🟢', 'On time', 'ok'], delayed: ['🟠', 'Delayed', 'warn'],
+      boarding: ['🟢', 'Boarding', 'ok'], departed: ['🔵', 'Departed', 'info'], in_air: ['🔵', 'In the air', 'info'],
+      landed: ['🔵', 'Landed', 'info'], cancelled: ['🔴', 'Cancelled', 'bad'], diverted: ['🔴', 'Diverted', 'bad'], unknown: ['⚪', 'Status unknown', ''],
+    };
+    let [dot, label, cls] = map[d.status] || map.unknown;
+    if (d.status !== 'delayed' && d.delayMinutes >= 15 && ['scheduled', 'on_time', 'boarding'].includes(d.status)) [dot, label, cls] = ['🟠', 'Delayed', 'warn'];
+    const head = `${label}${d.delayMinutes > 0 && cls === 'warn' ? ` ${fmtDuration(d.delayMinutes)}` : ''}${d.depEstimated && d.depEstimated !== d.depScheduled ? ` · departs ${t12(d.depEstimated)}` : ''}`;
+    const details = [
+      d.depTerminal && `Terminal ${d.depTerminal}`, d.depGate && `Gate ${d.depGate}`,
+      (d.arrEstimated || d.arrScheduled) && `Arrives ${t12(d.arrEstimated || d.arrScheduled)}${d.arrTerminal ? ` (T${d.arrTerminal.replace(/^T(erminal)?\s*/i, '')})` : ''}`,
+      d.baggage && `Baggage ${d.baggage}`,
+    ].filter(Boolean).join(' · ');
+    return wrap(`<strong class="small">${dot} ${esc(head)}</strong>${details ? `<span class="small">${esc(details)}</span>` : ''}${d.note ? `<span class="muted small">${esc(d.note)}</span>` : ''}${foot}`, cls);
+  }
+  const lv = { none: ['🟢', 'No known disruptions', 'ok'], minor: ['🟠', 'Some delays possible', 'warn'], major: ['🔴', 'Major disruption', 'bad'], unknown: ['⚪', 'Couldn\'t check', ''] }[d.level] || ['⚪', 'Unknown', ''];
+  return wrap(`<strong class="small">${lv[0]} ${esc(lv[1])}${d.extraMinutes > 0 ? ` · allow ~${esc(fmtDuration(d.extraMinutes))} extra` : ''}</strong>
+    ${d.summary ? `<span class="small">${esc(d.summary)}</span>` : ''}
+    ${(d.issues || []).length ? `<ul class="live-issues">${d.issues.slice(0, 5).map((x) => `<li><b>${esc(x.road)}</b> ${esc(x.issue)}${x.when ? ` <span class="muted">(${esc(x.when)})</span>` : ''}</li>`).join('')}</ul>` : ''}
+    ${d.roads?.length ? `<span class="muted small">Checked: ${esc(d.roads.join(', '))}. Live traffic: use Directions in Maps.</span>` : ''}${foot}`, lv[2]);
+}
+
+function refreshLive(kind, itemId) {
+  const el = main.querySelector(`.live[data-live="${kind}"][data-item="${CSS.escape(itemId)}"]`);
+  const it = S.items.find((i) => i.id === itemId);
+  if (!el || !it) return;
+  const ev = eventsForItem(it, bufferPct()).find((e) => (kind === 'flight' ? e.kind === 'depart' : e.kind === 'drive'));
+  if (ev) el.outerHTML = liveHtml(ev);
+}
+
+async function checkLive(kind, itemId) {
+  const it = S.items.find((i) => i.id === itemId);
+  if (!it || !S.settings.aiKey) return;
+  const k = liveKey(kind, it);
+  if (liveBusy.has(k)) return;
+  liveBusy.add(k); liveErr.delete(k);
+  refreshLive(kind, itemId);
+  try {
+    if (kind === 'flight') {
+      const data = await flightStatus(S.settings.aiKey, {
+        // "117" + airline "BA" → "BA 117", so the search finds the right flight.
+        number: /[A-Za-z]/.test(it.number) ? it.number : `${it.provider || ''} ${it.number}`.trim(),
+        airline: it.provider, from: it.from?.name, to: it.to?.name,
+        date: datePart(it.start), depTime: timePart(it.start), now: localDateTime(),
+      });
+      liveSet(k, data);
+    } else {
+      const roads = await routeRoads(it.from, it.to).catch(() => []);
+      const data = await roadConditions(S.settings.aiKey, {
+        from: it.from?.name, to: it.to?.name, date: datePart(it.start), time: timePart(it.start), roads, now: localDateTime(),
+      });
+      liveSet(k, { ...data, roads });
+    }
+  } catch (err) {
+    liveErr.set(k, friendlyError(err));
+  } finally {
+    liveBusy.delete(k);
+    refreshLive(kind, itemId);
+  }
+}
+
+const briefKey = (day) => `brief:${S.trip?.id}:${day}`;
+
+function briefHtml(day) {
+  if (!S.settings.aiKey) {
+    return `<h2>✨ Day summary</h2><p class="muted small">Get an AI overview of the day with weather, tips and nearby places to eat and visit. Needs the AI key on this phone: <a href="#/trip">set it up in Trip</a>.</p>`;
+  }
+  const k = briefKey(day);
+  if (liveBusy.has(k)) return '<h2>✨ Day summary</h2><p class="small" role="status">⏳ Looking at your day, the weather and what\'s nearby… (up to a minute)</p>';
+  const err = liveErr.get(k);
+  const cached = liveGet(k);
+  if (!cached) {
+    return `<h2>✨ Day summary</h2>
+      <p class="muted small">An overview of this day with weather, tips and suggestions for places to visit or eat near your plans. Uses your Anthropic key (a few cents per summary).</p>
+      ${err ? `<p class="error small">${esc(err)}</p>` : ''}
+      <button type="button" class="btn" data-brief>✨ Summarise this day</button>`;
+  }
+  const b = cached.data;
+  const icon = { attraction: '🏛️', restaurant: '🍽️', cafe: '☕', bar: '🍸', shopping: '🛍️', event: '🎟️', outdoors: '🌳', other: '📍' };
+  const mapUrl = (q) => (isApple ? `https://maps.apple.com/?q=${encodeURIComponent(q)}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`);
+  return `<h2>✨ Day summary</h2>
+    ${b.weather ? `<p class="brief-weather">🌤️ ${esc(b.weather)}</p>` : ''}
+    <p>${esc(b.overview)}</p>
+    ${(b.tips || []).length ? `<h3>Tips</h3><ul class="brief-tips">${b.tips.slice(0, 5).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
+    ${(b.suggestions || []).length ? `<h3>Ideas for the day</h3><ul class="brief-ideas">${b.suggestions.slice(0, 8).map((x, i) => `<li>
+      <span class="idea-icon" aria-hidden="true">${icon[x.category] || '📍'}</span>
+      <span class="idea-body"><strong>${esc(x.name)}</strong>${x.when ? ` <span class="muted small">· ${esc(x.when)}</span>` : ''}
+        <span class="small">${esc(x.why)}</span>
+        <span class="idea-actions"><a class="small" href="${esc(mapUrl(`${x.name}, ${x.address}`))}" target="_blank" rel="noopener">Map</a>
+        ${canEdit() ? `<button type="button" class="link small" data-idea="${i}">＋ Add to plan</button>` : ''}</span></span></li>`).join('')}</ul>` : ''}
+    ${err ? `<p class="error small">${esc(err)}</p>` : ''}
+    <p class="muted small">AI suggestions: check opening times before you go. Updated ${esc(ago(cached.at))} · <button type="button" class="link small" data-brief>Refresh</button></p>`;
+}
+
+function dayContext(day) {
+  const ag = dayAgenda(S.items, day, bufferPct());
+  const span = tripSpan(S.meta, S.items);
+  const days = dateRange(span.start, span.end);
+  const lines = [`Trip: ${S.meta.name || 'Trip'}. This day: ${fmtDate(day, { long: true })}${days.includes(day) ? ` (day ${days.indexOf(day) + 1} of ${days.length})` : ''}. Today's date for the traveller: ${localDate()}.`];
+  if (ag.lastNight) lines.push(`Woke up at: ${ag.lastNight.title}${ag.lastNight.place?.name ? `, ${ag.lastNight.place.name}` : ''}.`);
+  if (ag.tonight) lines.push(`Sleeping tonight at: ${ag.tonight.title}${ag.tonight.place?.name ? `, ${ag.tonight.place.name}` : ''}.`);
+  for (const it of ag.ongoing) lines.push(`Ongoing: ${itemTitle(it)}${it.type === 'car' ? ' (has a hire car)' : ''}.`);
+  lines.push(ag.events.length ? 'Plans (local times):' : 'No fixed plans this day.');
+  for (const ev of ag.events) {
+    const p = ev.place?.name ? ` at ${ev.place.name}` : '';
+    const to = ev.endPlace?.name ? ` to ${ev.endPlace.name}` : '';
+    lines.push(`- ${timePart(ev.at)}${ev.endAt ? `–${timePart(ev.endAt)}` : ''} ${ev.label}${p}${to}${ev.item.notes ? ` (notes: ${ev.item.notes.slice(0, 200)})` : ''}`);
+  }
+  for (const leg of driveLegs(ag)) {
+    const r = cachedRoute(leg.from, leg.to);
+    if (r && !r.error) lines.push(`Travel: about ${fmtDuration(r.durationMin)} by car from ${leg.from.name} to ${leg.to.name}.`);
+  }
+  return lines.join('\n');
+}
+
+async function runBrief(day) {
+  const k = briefKey(day);
+  if (liveBusy.has(k) || !S.settings.aiKey) return;
+  liveBusy.add(k); liveErr.delete(k);
+  const paint = () => { const el = $('#brief'); if (el && el.dataset.day === day) el.innerHTML = briefHtml(day); };
+  paint();
+  try {
+    liveSet(k, await dayBrief(S.settings.aiKey, dayContext(day)));
+  } catch (err) {
+    liveErr.set(k, friendlyError(err));
+  } finally {
+    liveBusy.delete(k);
+    paint();
+  }
+}
+
+async function addIdea(day, i) {
+  const x = liveGet(briefKey(day))?.data?.suggestions?.[i];
+  if (!x) return;
+  toast('Finding it on the map…');
+  let place = { name: x.address ? `${x.name}, ${x.address}` : x.name };
+  try {
+    const [hit] = await searchPlaces(x.address ? `${x.name}, ${x.address}` : x.name);
+    const hit2 = hit || (x.address ? (await searchPlaces(x.address))[0] : null);
+    if (hit2) place = { name: `${x.name}, ${x.address || hit2.name}`.slice(0, 200), lat: hit2.lat, lon: hit2.lon };
+  } catch { /* keep the name only */ }
+  const start = `${day}T${guessTime(x.when)}`;
+  openItemForm('activity', null, { title: x.name, place, start, notes: x.why });
 }
 
 // ---------- Plan (whole itinerary) ----------
@@ -862,7 +1072,12 @@ main.addEventListener('click', (e) => {
   if (open) { openTrip(open.dataset.open, open.dataset.kind); go('#/today'); return; }
   const edit = e.target.closest('[data-edit]');
   if (edit) { const it = S.items.find((i) => i.id === edit.dataset.edit); if (it) openItemForm(it.type, it); return; }
-  if (e.target.closest('[data-add]')) openAddChooser();
+  if (e.target.closest('[data-add]')) { openAddChooser(); return; }
+  const lc = e.target.closest('[data-live-check]');
+  if (lc) { checkLive(lc.dataset.liveCheck, lc.dataset.item); return; }
+  if (e.target.closest('[data-brief]')) { runBrief(S.viewDay); return; }
+  const idea = e.target.closest('[data-idea]');
+  if (idea) addIdea(S.viewDay, Number(idea.dataset.idea));
 });
 
 // ---------- sheet (dialog) ----------

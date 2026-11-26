@@ -277,3 +277,153 @@ export function normalizeBookings(raw, { currency = 'USD' } = {}) {
 
 /** Places in a draft that still need map coordinates. */
 export const placesToLocate = (d) => ['place', 'from', 'to'].filter((k) => d[k] && d[k].name && !(isFinite(d[k].lat) && isFinite(d[k].lon)));
+
+// ---------- live checks with web search (flight status, road disruptions, day brief) ----------
+//
+// Claude searches the web (server-side web_search tool), then reports through a
+// strict client tool, so the answer always has the shape the app expects.
+
+const WEB_SEARCH = { type: 'web_search_20260209', name: 'web_search' };
+
+const str = (description) => ({ type: 'string', description });
+const obj = (properties, description) => ({
+  type: 'object', description, properties, required: Object.keys(properties), additionalProperties: false,
+});
+
+export const FLIGHT_STATUS_TOOL = {
+  name: 'report_flight_status',
+  description: 'Report the status of the flight after searching for it. Call this exactly once.',
+  strict: true,
+  input_schema: obj({
+    found: { type: 'boolean', description: 'False if no status information for this flight on this date could be found.' },
+    status: { type: 'string', enum: ['scheduled', 'on_time', 'delayed', 'boarding', 'departed', 'in_air', 'landed', 'cancelled', 'diverted', 'unknown'] },
+    delayMinutes: { type: 'integer', description: 'Departure delay in minutes (0 if on time or unknown).' },
+    depScheduled: str('Scheduled departure, local time "HH:MM", or empty.'),
+    depEstimated: str('Estimated or actual departure, local time "HH:MM", or empty.'),
+    arrScheduled: str('Scheduled arrival, local time "HH:MM", or empty.'),
+    arrEstimated: str('Estimated or actual arrival, local time "HH:MM", or empty.'),
+    depTerminal: str('Departure terminal, or empty.'),
+    depGate: str('Departure gate, or empty.'),
+    arrTerminal: str('Arrival terminal, or empty.'),
+    baggage: str('Baggage belt/carousel, or empty.'),
+    note: str('One short sentence with anything else useful (e.g. reason for delay), or empty.'),
+    source: str('Name of the site the status came from, e.g. "FlightAware", or empty.'),
+  }),
+};
+
+export const ROAD_TOOL = {
+  name: 'report_road_conditions',
+  description: 'Report known disruptions on the route after searching. Call this exactly once.',
+  strict: true,
+  input_schema: obj({
+    level: { type: 'string', enum: ['none', 'minor', 'major', 'unknown'], description: 'none: nothing found; minor: small delays likely; major: closures or long delays.' },
+    extraMinutes: { type: 'integer', description: 'Rough extra time to allow because of the disruptions (0 if none).' },
+    summary: str('One short sentence for a traveller, e.g. "Overnight closure on M4 J17–18; no daytime issues found."'),
+    issues: {
+      type: 'array',
+      items: obj({ road: str('Road, e.g. "M4"'), issue: str('What and where, briefly'), when: str('When it applies, or empty') }),
+    },
+  }),
+};
+
+export const DAY_BRIEF_TOOL = {
+  name: 'report_day_brief',
+  description: 'Report the summary of the day and suggestions. Call this exactly once.',
+  strict: true,
+  input_schema: obj({
+    overview: str('2–4 friendly sentences summarising the day: what happens when, travel between plans, free time.'),
+    weather: str('Short weather outlook for the location and date if found, else empty.'),
+    tips: { type: 'array', items: str('One practical tip (timing, tickets, opening hours, transport, what to bring). Max 5 tips.') },
+    suggestions: {
+      type: 'array',
+      items: obj({
+        name: str('Name of the place or event'),
+        category: { type: 'string', enum: ['attraction', 'restaurant', 'cafe', 'bar', 'shopping', 'event', 'outdoors', 'other'] },
+        why: str('One sentence on why it suits this day'),
+        when: str('Best time, e.g. "Lunch", "After 16:00", or empty'),
+        address: str('Street address or area and city, good enough to find on a map'),
+      }),
+    },
+  }),
+};
+
+/** Run Claude with web search until it calls `tool`; returns the tool's input. */
+async function searchAndReport(apiKey, { system, prompt, tool, maxSearches = 4, signal }) {
+  const client = await makeClient(apiKey);
+  const messages = [{ role: 'user', content: prompt }];
+  for (let i = 0; i < 4; i++) {
+    const message = await client.beta.messages.create({
+      model: MODEL,
+      max_tokens: 16000,
+      betas: ['server-side-fallback-2026-07-01'],
+      fallbacks: 'default',
+      output_config: { effort: 'medium' },
+      system,
+      tools: [{ ...WEB_SEARCH, max_uses: maxSearches }, tool],
+      tool_choice: { type: 'auto' },
+      messages,
+    }, { signal });
+    if (message.stop_reason === 'refusal') throw new Error('Claude declined this request.');
+    const call = message.content.find((b) => b.type === 'tool_use' && b.name === tool.name);
+    if (call) return call.input;
+    if (message.stop_reason === 'pause_turn') { messages.push({ role: 'assistant', content: message.content }); continue; }
+    // Finished without reporting: ask once more for the report.
+    messages.push({ role: 'assistant', content: message.content });
+    messages.push({ role: 'user', content: `Please call ${tool.name} with what you found.` });
+  }
+  throw new Error('Couldn\'t get an answer. Try again in a moment.');
+}
+
+/** Live status of a flight on its date. `flight`: {airline, number, from, to, date, depTime}. */
+export function flightStatus(apiKey, flight, opts = {}) {
+  return searchAndReport(apiKey, {
+    ...opts,
+    system: 'You look up live flight status on the web (airline sites, FlightAware, Flightradar24, airport departure boards) and report it. Use local times at each airport. Only report what the sources say for this exact flight and date; if unsure, set found to false.',
+    prompt: `Flight ${flight.number}${flight.airline ? ` (${flight.airline})` : ''} from ${flight.from || '?'} to ${flight.to || '?'} on ${flight.date}, scheduled to depart at ${flight.depTime || 'unknown'} local time. Current time for the traveller: ${flight.now}. Find its current status and call report_flight_status.`,
+    tool: FLIGHT_STATUS_TOOL,
+    maxSearches: 4,
+  });
+}
+
+/** Known roadworks, closures and incidents for a drive. `drive`: {from, to, date, time, roads}. */
+export function roadConditions(apiKey, drive, opts = {}) {
+  return searchAndReport(apiKey, {
+    ...opts,
+    system: 'You check for planned roadworks, closures, events and reported incidents that could delay a car journey, using traffic authority and news sites. You cannot see live congestion; say so only if relevant. Be concise and only report issues that affect this route at this time.',
+    prompt: `Drive from ${drive.from} to ${drive.to} on ${drive.date}${drive.time ? `, leaving around ${drive.time}` : ''}. Main roads on the route: ${drive.roads.length ? drive.roads.join(', ') : 'unknown'}. Current time: ${drive.now}. Search for disruptions on these roads for that day and call report_road_conditions.`,
+    tool: ROAD_TOOL,
+    maxSearches: 4,
+  });
+}
+
+/** Summary of one day of the trip with suggestions. `day`: plain-text description built by the app. */
+export function dayBrief(apiKey, day, opts = {}) {
+  return searchAndReport(apiKey, {
+    ...opts,
+    system: 'You are a friendly, practical travel assistant. Summarise the traveller\'s day and suggest a few things nearby that fit around their plans (attractions, places to eat, events on that date). Prefer places close to where they will be and open at the suggested time. Do not suggest anything already in their plan. Keep it short.',
+    prompt: `${day}\n\nSearch for the weather and anything relevant on this date (events, closures, opening hours), then call report_day_brief with an overview, up to 5 tips and 3–6 suggestions.`,
+    tool: DAY_BRIEF_TOOL,
+    maxSearches: 5,
+  });
+}
+
+/** A start time for a suggestion's "when" ("Lunch", "After 16:00", "Evening"…). */
+export function guessTime(when = '') {
+  const w = String(when).toLowerCase();
+  const m = w.match(/(\d{1,2})[:.](\d{2})/) || w.match(/\b(\d{1,2})\s*(am|pm)\b/);
+  if (m) {
+    let h = Number(m[1]);
+    const min = m[2] && /^\d{2}$/.test(m[2]) ? m[2] : '00';
+    if (m[2] === 'pm' && h < 12) h += 12;
+    if (m[2] === 'am' && h === 12) h = 0;
+    if (h >= 0 && h < 24) return `${String(h).padStart(2, '0')}:${min}`;
+  }
+  if (/breakfast/.test(w)) return '08:30';
+  if (/brunch/.test(w)) return '10:30';
+  if (/lunch/.test(w)) return '12:30';
+  if (/afternoon/.test(w)) return '15:00';
+  if (/sunset|evening|dinner/.test(w)) return /dinner/.test(w) ? '19:00' : '18:00';
+  if (/night|late/.test(w)) return '21:00';
+  if (/morning/.test(w)) return '10:00';
+  return '10:00';
+}
