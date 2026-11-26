@@ -2361,19 +2361,27 @@ function voiceId() {
   const l = (navigator.language || '').toLowerCase();
   return l.startsWith('en-gb') || l.startsWith('en-ie') ? 'pandora' : l.startsWith('en-au') || l.startsWith('en-nz') ? 'theia' : 'thalia';
 }
-async function fetchSpeech(text, voiceName = voiceId()) {
-  const res = await fetch(`${aiProxyUrl}/v1/speech`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${await store.idToken()}`, 'x-trip-id': S.trip.id },
-    body: JSON.stringify({ text, voice: voiceName }),
-  });
-  if (!res.ok) {
-    const d = await res.json().catch(() => ({}));
-    const e = new Error(String(d.error?.message || `Voice error ${res.status}`).replace(/^Trip AI: /, ''));
-    e.status = res.status;
+async function fetchSpeech(text, voiceName = voiceId(), { timeoutMs = 25000 } = {}) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${aiProxyUrl}/v1/speech`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${await store.idToken()}`, 'x-trip-id': S.trip.id },
+      body: JSON.stringify({ text, voice: voiceName }),
+      signal: ctl.signal,
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      const e = new Error(String(d.error?.message || `Voice error ${res.status}`).replace(/^Trip AI: /, ''));
+      e.status = res.status;
+      throw e;
+    }
+    return await res.blob();
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('The voice took too long to arrive. Try again, or check your connection.');
     throw e;
-  }
-  return res.blob();
+  } finally { clearTimeout(timer); }
 }
 /** Call in the tap that will lead to reading something aloud. */
 function unlockVoice() {
@@ -2384,39 +2392,57 @@ function unlockVoice() {
 let readSeq = 0;
 /**
  * Read an answer aloud. onState(state, extra) reports progress:
- * 'loading' → 'playing' → 'done'; 'blocked' (extra: play() to call from a tap)
- * when the phone wouldn't start the sound by itself; 'error' (extra: message).
+ * 'loading' (waiting for the server) → 'starting' (audio here, phone starting
+ * it) → 'playing' → 'done'; 'blocked' (extra: play() to call from a tap) when
+ * the phone won't start the sound by itself; 'error' (extra: message).
+ * Natural voice is fetched in short pieces, so it starts quickly and each
+ * piece stays small; the next piece loads while one plays.
  */
 async function readAloud(text, { onState } = {}) {
   const seq = ++readSeq;
   const plain = speakableText(text);
-  const state = (s, x) => { if (seq === readSeq || s === 'done') onState?.(s, x); };
-  const done = () => state('done');
+  const live = () => seq === readSeq;
+  const state = (st, x) => { if (live() || st === 'done') onState?.(st, x); };
   if (naturalVoice()) {
-    state('loading');
-    let blob;
-    try {
-      blob = await fetchSpeech(plain);
-    } catch (e) {
-      if (seq !== readSeq) return;
-      if (e.status === 501 || e.status === 404) {
-        naturalMissingUntil = Date.now() + 60000; // server not set up for voice: try again in a minute
-      } else { state('error', e.message); return; }
-    }
-    if (seq !== readSeq) return;
-    if (blob) {
-      try {
-        await voice.playAudio(blob, { onEnd: done });
-        state('playing');
-      } catch (e) {
-        if (seq !== readSeq) return;
-        if (e.name === 'NotAllowedError') {
-          // iPhone needs a tap to start this sound (e.g. after using the microphone).
-          state('blocked', () => voice.playAudio(blob, { onEnd: done }).then(() => state('playing'), (x) => state('error', x.message)));
-        } else state('error', 'This phone couldn\'t play the voice.');
+    const pieces = voice.speechChunks(plain, 320);
+    const fetches = [];
+    const get = (i) => {
+      if (!fetches[i]) { fetches[i] = fetchSpeech(pieces[i]); fetches[i].catch(() => {}); }
+      return fetches[i];
+    };
+    // Play piece i; resolves when it ends. Rejects 'blocked' if the phone won't start it.
+    const playPiece = (blob, onStart) => new Promise((resolve, reject) => {
+      let started = false;
+      const timer = setTimeout(() => { if (!started) { voice.stopAudio(); reject(Object.assign(new Error('blocked'), { name: 'NotAllowedError' })); } }, 6000);
+      voice.playAudio(blob, { onEnd: () => { clearTimeout(timer); if (started) resolve(); } })
+        .then(() => { started = true; clearTimeout(timer); onStart(); }, (e) => { clearTimeout(timer); reject(e); });
+    });
+    const run = async (from) => {
+      for (let i = from; i < pieces.length; i++) {
+        let blob;
+        try { blob = await get(i); } catch (e) {
+          if (!live()) return;
+          if (i === 0 && (e.status === 501 || e.status === 404)) { naturalMissingUntil = Date.now() + 60000; return 'fallback'; }
+          state('error', e.message);
+          return;
+        }
+        if (!live()) return;
+        if (i + 1 < pieces.length) get(i + 1); // load the next piece while this one plays
+        if (i === from) state('starting');
+        try {
+          await playPiece(blob, () => { if (live()) state('playing'); });
+        } catch (e) {
+          if (!live()) return;
+          if (e.name === 'NotAllowedError') { state('blocked', () => { state('starting'); run(i); }); return; }
+          state('error', 'This phone couldn\'t play the voice.');
+          return;
+        }
+        if (!live()) return;
       }
-      return;
-    }
+      state('done');
+    };
+    state('loading');
+    if (await run(0) !== 'fallback') return;
   }
   if (!voice.phoneVoiceWorks()) {
     state('error', aiProxyUrl && S.trip?.kind === 'cloud'
@@ -2425,7 +2451,7 @@ async function readAloud(text, { onState } = {}) {
     return;
   }
   state('playing');
-  voice.speak(plain, { onEnd: done });
+  voice.speak(plain, { onEnd: () => state('done') });
 }
 function stopReading() { readSeq++; voice.stopSpeaking(); }
 
@@ -2520,6 +2546,7 @@ function openChat() {
     readAloud(text, {
       onState: (st, x) => {
         if (st === 'loading') voiceBtn('⏳ Getting voice… ■');
+        else if (st === 'starting') voiceBtn('⏳ Starting… ■');
         else if (st === 'playing') voiceBtn('■ Stop reading');
         else if (st === 'blocked') { playBlocked = x; voiceBtn('▶ Play answer'); }
         else if (st === 'error') { voiceBtn(''); toast(x); }

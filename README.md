@@ -215,7 +215,7 @@ Answers in the trip chat can be read aloud. The phone's own voice often sounds r
 2. Paste the latest `workers/trip-ai/worker.js` into the worker (**Edit code**) and **Deploy**.
 3. In the app: **Trip → On this device → Voice** to pick a voice, and **🔊 Test voice → Test natural voice** to hear it.
 
-Optional variable `SPEECH_DAILY_LIMIT` (spoken answers per phone per day, default 150).
+Optional variable `SPEECH_DAILY_LIMIT` (pieces of speech per phone per day, default 400; answers are read in pieces of a sentence or two).
 
 ## Reminders (push notifications)
 
