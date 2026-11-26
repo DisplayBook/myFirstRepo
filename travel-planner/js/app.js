@@ -13,6 +13,8 @@ import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount, payment } from './budget.js';
 import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime, askTrip, flightDetails, normalizeFlightLookup, suggestPacking } from './ai.js';
 import { SHARED, PACK_CATEGORIES, TEMPLATES, categoryLabel, splitPacking, expandItems, templateItems, progress as packProgress, groupByCategory, resolveWho, packingTripContext } from './packing.js';
+import { REMINDER_KINDS, ALL_KINDS, buildReminders, remindersHash } from './reminders.js';
+import * as notify from './notify.js';
 import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea } from './chat.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -106,7 +108,7 @@ function openTrip(id, kind) {
     }
     if (data.meta.name) store.rememberTrip({ id, name: data.meta.name, kind });
     const sig = JSON.stringify([data.meta, data.items, S.files.map((f) => [f.id, f.itemId]), S.packing]);
-    if (sig !== S.sig || roleChanged) { S.sig = sig; render({ fromData: true }); }
+    if (sig !== S.sig || roleChanged) { S.sig = sig; render({ fromData: true }); queueReminderSync(); }
   }, (st) => { S.status = st; renderStatus(); });
   renderStatus();
 }
@@ -126,6 +128,34 @@ async function aiAuth() {
   if (S.settings.aiKey) return { apiKey: S.settings.aiKey };
   if (sharedAi()) return { baseURL: aiProxyUrl, apiKey: await store.idToken(), headers: { 'x-trip-id': S.trip.id } };
   throw new Error('AI features aren\'t set up on this phone');
+}
+
+// ---------- reminders ----------
+// Any phone on a shared trip keeps the trip server's reminder list up to date
+// (it's only stored if some phone has reminders on); the server sends them.
+
+const remindersAvailable = () => !!(aiProxyUrl && S.trip?.kind === 'cloud');
+const remAuth = async () => ({ base: aiProxyUrl, token: await store.idToken(), tripId: S.trip.id });
+let tzlookup = null;
+async function tripReminders() {
+  tzlookup = tzlookup || (await import('../vendor/tz-lookup/tz.js')).default;
+  return buildReminders({ meta: S.meta, items: S.items, packing: S.packing }, {
+    tzlookup, deviceTz: Intl.DateTimeFormat().resolvedOptions().timeZone, bufferPct: bufferPct(),
+    routeFor: cachedRoute, currency: homeCurrency(S.meta),
+  });
+}
+let remTimer;
+function queueReminderSync(delay = 4000) {
+  if (!remindersAvailable() || !S.exists || !navigator.onLine) return;
+  const tripId = S.trip.id;
+  clearTimeout(remTimer);
+  remTimer = setTimeout(async () => {
+    if (S.trip?.id !== tripId) return;
+    try {
+      const list = await tripReminders();
+      await notify.syncSchedule(await remAuth(), list, remindersHash(list));
+    } catch { /* tried again on the next change */ }
+  }, delay);
 }
 
 /** Run a write. Local writes are awaited; cloud writes are optimistic (they also work offline). */
@@ -199,6 +229,10 @@ function renderStatus() {
 function render({ fromData = false } = {}) {
   const r = parseRoute();
   if (r.name === 'join') { if (isTripId(r.arg)) joinTrip(r.arg, /^[0-9A-Za-z]{20,40}$/.test(r.arg2) ? r.arg2 : ''); else go('#/trips'); return; }
+  if (isTripId(r.arg2) && r.arg2 !== S.trip?.id && (r.name === 'today' || r.name === 'trip')) {
+    const t = store.myTrips().find((x) => x.id === r.arg2);
+    if (t) openTrip(t.id, t.kind);
+  }
   if (!S.trip && r.name !== 'trips') { go('#/trips'); return; }
   const name = r.name || 'today';
   // Don't rebuild the map for status-only updates while you're looking at it.
@@ -1174,6 +1208,85 @@ function renderBudget() {
 
 // ---------- Trip settings ----------
 
+// Choices made before turning reminders on survive live re-renders.
+let remDraft = { trip: '', kinds: [] };
+
+function remindersCardHtml() {
+  const head = '<h2>🔔 Reminders</h2>';
+  if (S.trip.kind !== 'cloud') return `${head}<p class="muted">Reminders work on shared trips. Move this trip to shared sync (above) to turn them on.</p>`;
+  if (!aiProxyUrl) return `${head}<p class="muted">Reminders need the trip server (see "Shared AI key" in the README).</p>`;
+  const sup = notify.support();
+  if (sup === 'ios-home') {
+    return `${head}<p>On iPhone, notifications work once the app is on your Home Screen:</p>
+      <ol class="steps small"><li>In Safari, tap <strong>Share</strong> then <strong>Add to Home Screen</strong>.</li>
+      <li>Open the app from the new icon, come back here and turn reminders on.</li></ol>`;
+  }
+  if (sup === 'unsupported') return `${head}<p class="muted">This browser can't show notifications. Try Safari on iPhone (from the Home Screen), or Chrome.</p>`;
+  const kinds = notify.tripKinds(S.trip.id);
+  const on = !!kinds && sup === 'ok';
+  const chosen = new Set(kinds || (remDraft.trip === S.trip.id ? remDraft.kinds : ALL_KINDS));
+  return `${head}
+    ${sup === 'denied' ? '<p class="warn-text">Notifications are blocked for this app. Allow them in your phone&#39;s Settings (iPhone: Settings → Notifications → Trip Planner), then come back.</p>' : ''}
+    <p>${on ? '✅ On for this phone. You&#39;ll get notifications even when the app is closed.' : 'Get a notification on this phone when it&#39;s time to leave, before flights, check-outs, payments and more.'}</p>
+    <fieldset class="plain rem-kinds"><legend class="small muted">Remind me about</legend>
+      ${REMINDER_KINDS.map(([k, label, hint]) => `<label class="check"><input type="checkbox" name="rem" value="${k}" ${chosen.has(k) ? 'checked' : ''}> <span>${esc(label)}<small class="muted">${esc(hint)}</small></span></label>`).join('')}
+    </fieldset>
+    <div class="row">${on ? `<button type="button" class="btn ghost" id="rem-test">Send a test</button>
+      <button type="button" class="btn ghost danger" id="rem-off">Turn off</button>` : `<button type="button" class="btn" id="rem-on" ${sup === 'denied' ? 'disabled' : ''}>🔔 Turn on reminders</button>`}</div>
+    <h3 class="mt">Coming up</h3>
+    <ul class="rem-next" id="rem-next"><li class="muted small">Working out reminders…</li></ul>
+    <p class="muted small">Times use the time zone of each place. Each phone chooses its own reminders; the trip's server sends them (they can arrive a few minutes late).</p>`;
+}
+
+function wireReminders() {
+  const card = $('#reminders');
+  if (!card || !remindersAvailable()) return;
+  const chosen = () => $$('input[name="rem"]:checked', card).map((i) => i.value);
+  const busy = (btn, label) => { if (btn) { btn.disabled = true; btn.textContent = label; } };
+  const list = $('#rem-next', card);
+  const showNext = () => {
+    if (!list) return;
+    tripReminders().then((all) => {
+      if (!list.isConnected) return;
+      const want = new Set(chosen());
+      const next = all.filter((r) => want.has(r.kind)).slice(0, 6);
+      list.innerHTML = next.length ? next.map((r) => `<li><span class="rem-when">${esc(new Date(r.at).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: S.settings.h12 }))}</span>
+        <span><strong>${esc(r.title)}</strong><small class="muted">${esc(r.body)}</small></span></li>`).join('')
+        : '<li class="muted small">Nothing coming up yet. Reminders appear here as you add plans with dates and times.</li>';
+    }).catch(() => { if (list.isConnected) list.innerHTML = '<li class="muted small">Couldn&#39;t work out reminders.</li>'; });
+  };
+  showNext();
+  card.onchange = async (e) => {
+    if (e.target.name !== 'rem') return;
+    remDraft = { trip: S.trip.id, kinds: chosen() };
+    showNext();
+    if (!notify.tripKinds(S.trip.id)) return;
+    try { await notify.enable(await remAuth(), chosen(), S.settings.name); queueReminderSync(0); toast('Reminders updated'); } catch (x) { toast(x.message); }
+  };
+  const onBtn = $('#rem-on', card);
+  if (onBtn) onBtn.onclick = async () => {
+    busy(onBtn, 'Turning on…');
+    try {
+      const phones = await notify.enable(await remAuth(), chosen(), S.settings.name);
+      queueReminderSync(0);
+      toast(`Reminders on${phones > 1 ? ` (${phones} phones on this trip)` : ''}`);
+    } catch (x) { toast(x.message); }
+    render({ fromData: true });
+  };
+  const off = $('#rem-off', card);
+  if (off) off.onclick = async () => {
+    busy(off, 'Turning off…');
+    try { await notify.disable(await remAuth()); toast('Reminders off for this phone'); } catch (x) { toast(x.message); }
+    render({ fromData: true });
+  };
+  const test = $('#rem-test', card);
+  if (test) test.onclick = async () => {
+    busy(test, 'Sending…');
+    try { await notify.sendTest(await remAuth()); toast('Test sent: it should arrive in a few seconds'); } catch (x) { toast(x.message); }
+    test.disabled = false; test.textContent = 'Send a test';
+  };
+}
+
 function renderTripSettings() {
   if (loadingOrMissing()) return;
   const m = S.meta;
@@ -1230,6 +1343,7 @@ function renderTripSettings() {
       <h2>Documents</h2>
       ${S.files.length ? `<div id="all-docs"></div>` : '<p class="muted">Tickets, booking confirmations and photos you attach to bookings appear here.</p>'}
     </section>
+    <section class="card" id="reminders">${remindersCardHtml()}</section>
     <section class="card" id="scan-settings">
       <h2>AI features</h2>
       <p>Scan bookings, live flight status, road delays, day summaries and the trip chat use Claude (by Anthropic).</p>
@@ -1283,6 +1397,7 @@ function renderTripSettings() {
     store.rememberTrip({ id: S.trip.id, name: patch.name, kind: S.trip.kind });
     toast('Trip saved');
   };
+  wireReminders();
   const aiForm = $('#ai-form');
   if (aiForm) aiForm.onsubmit = (e) => {
     e.preventDefault();
@@ -2466,6 +2581,10 @@ function start() {
   if (cur) openTrip(cur.id, cur.kind);
   render();
 }
+
+navigator.serviceWorker?.addEventListener?.('message', (e) => {
+  if (e.data?.type === 'open' && typeof e.data.hash === 'string' && e.data.hash.startsWith('#/')) location.hash = e.data.hash;
+});
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:' && !navigator.webdriver) {
   // Check for a new version on every launch, bypassing the HTTP cache.

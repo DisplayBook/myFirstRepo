@@ -516,3 +516,13 @@ body[data-view="map"] .fab { bottom: calc(var(--tabbar-h) + env(safe-area-inset-
   * { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
 .typegroup { margin: 14px 0 0; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.rem-kinds { display: grid; gap: 8px; margin: 10px 0; }
+.rem-kinds legend { margin-bottom: 4px; }
+.rem-kinds label.check { align-items: flex-start !important; }
+.rem-kinds label.check span { display: grid; gap: 2px; }
+.rem-kinds input { margin-top: 3px; width: 20px; height: 20px; flex: none; }
+.rem-next { list-style: none; margin: 6px 0 10px; padding: 0; display: grid; gap: 8px; }
+.rem-next li { display: grid; grid-template-columns: 7.5em 1fr; gap: 10px; align-items: start; }
+.rem-next li.muted { display: block; }
+.rem-next li > span:last-child { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.rem-when { font-size: .85rem; color: var(--muted); font-variant-numeric: tabular-nums; }

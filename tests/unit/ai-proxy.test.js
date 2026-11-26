@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import worker, { makeHandler, verifyFirebaseToken, checkBody } from '../worker-loader.mjs';
 
-test('proxy: the deployable file only exports fetch', () => {
-  assert.deepEqual(Object.keys(worker), ['fetch']);
+test('proxy: the deployable file only exports fetch and scheduled', () => {
+  assert.deepEqual(Object.keys(worker), ['fetch', 'scheduled']);
 });
 
 const PROJECT = 'my-travel-planner-57cef';

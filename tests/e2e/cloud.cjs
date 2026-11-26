@@ -27,7 +27,14 @@ export const aiProxyUrl = 'https://trip-ai.test';`;
 // against the Firestore emulator; Anthropic is mocked. Emulator sign-in tokens are
 // unsigned, so the token's signature check is replaced by a project check here.
 const upstreamCalls = [];
-class FakeKV { constructor() { this.m = new Map(); } async get(k) { return this.m.get(k) ?? null; } async put(k, v) { this.m.set(k, v); } }
+class FakeKV {
+  constructor() { this.m = new Map(); }
+  async get(k, type) { const v = this.m.get(k); return v == null ? null : type === 'json' ? JSON.parse(v) : v; }
+  async put(k, v) { this.m.set(k, String(v)); }
+  async delete(k) { this.m.delete(k); }
+}
+// Notifications the trip server sent (to the phones' push services).
+const pushes = [];
 const proxyEnv = { ANTHROPIC_API_KEY: 'sk-ant-server-key', ALLOWED_ORIGIN: `http://localhost:${PORT}`, FIREBASE_PROJECT_ID: 'demo-trips', USAGE: new FakeKV(), DAILY_LIMIT: '3' };
 let proxyHandler;
 async function getProxy() {
@@ -41,6 +48,7 @@ async function getProxy() {
       return p.sub;
     },
     fetch: async (url, init) => {
+      if (String(url).startsWith('https://fcm.googleapis.com/')) { pushes.push({ url: String(url), headers: init.headers }); return new Response(null, { status: 201 }); }
       if (!String(url).startsWith('https://api.anthropic.com/')) return fetch(url, init);
       upstreamCalls.push({ url: String(url), headers: init.headers, body: JSON.parse(init.body) });
       const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
@@ -76,8 +84,29 @@ async function main() {
   if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
   const errors = [];
 
-  async function phone(name) {
+  async function phone(name, { push = false } = {}) {
     const context = await browser.newContext({ ...devices['iPhone 13'], bypassCSP: true });
+    // A phone that can get notifications (added to the Home Screen): its push service is simulated.
+    if (push) {
+      await context.addInitScript(() => {
+        const sub = {
+          endpoint: 'https://fcm.googleapis.com/fcm/send/fake-phone', options: {},
+          toJSON() { return { endpoint: this.endpoint, keys: { p256dh: 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4', auth: 'BTBZMqHH6r4Tts7J_aSIgg' } }; },
+          async unsubscribe() { window.__pushSub = null; return true; },
+        };
+        window.__pushSub = null;
+        const pushManager = {
+          async getSubscription() { return window.__pushSub; },
+          async subscribe(o) { sub.options = { applicationServerKey: o.applicationServerKey.buffer }; window.__pushSub = sub; return sub; },
+        };
+        window.PushManager = function PushManager() {};
+        Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: {
+          ready: Promise.resolve({ pushManager }), register: async () => ({ update() {} }), addEventListener() {}, getRegistration: async () => null, controller: null,
+        } });
+        const N = { permission: 'default', requestPermission: async () => { N.permission = 'granted'; return 'granted'; } };
+        window.Notification = N;
+      });
+    }
     await context.route('https://www.gstatic.com/firebasejs/**', (route) => {
       const file = path.join(FB_DIR, path.basename(new URL(route.request().url()).pathname));
       route.fulfill({ status: 200, contentType: 'text/javascript', body: fs.readFileSync(file) });
@@ -112,7 +141,7 @@ async function main() {
   let viewLink = '', adminLink = '';
   try {
     const alice = await phone('alice');
-    const viewer = await phone('viewer');
+    const viewer = await phone('viewer', { push: true });
     const carol = await phone('carol');
 
     await check('admin creates a shared trip', async () => {
@@ -165,6 +194,7 @@ async function main() {
       await viewer.goto(`${BASE}#/today/2026-12-03`);
       await viewer.getByText('Nothing planned for this day.').waitFor();
       await alice.goto(`${BASE}#/today/2026-12-03`);
+      await alice.goto(`${BASE}#/today`);
       await addActivity(alice, 'Vatican Museums', '2026-12-03T09:00');
       await viewer.getByText('Vatican Museums').waitFor({ timeout: 15000 });
     });
@@ -271,6 +301,66 @@ async function main() {
       await viewer.locator('.pk', { hasText: 'Passport' }).getByRole('checkbox').check({ timeout: 15000 });
       await alice.locator('.pk.done', { hasText: 'Passport' }).waitFor({ timeout: 15000 });
       await alice.getByText('1 of 1 packed').waitFor();
+    });
+
+    await check('reminders: a phone turns them on, the server gets the plan\'s reminders and sends them when due', async () => {
+      const day = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+      await alice.goto(`${BASE}#/today`);
+      await addActivity(alice, 'Sistine Chapel', `${day(10)}T10:00`);
+      await viewer.goto(`${BASE}#/trip`);
+      const card = viewer.locator('#reminders');
+      await card.getByRole('heading', { name: '🔔 Reminders' }).waitFor();
+      await card.getByText('In 1 hour: Colosseum tour').waitFor({ timeout: 15000 });
+      await viewer.shot('reminders-off');
+      await card.getByLabel(/Payments due/).uncheck();
+      await card.getByRole('button', { name: /Turn on reminders/ }).click();
+      await card.getByText('✅ On for this phone').waitFor({ timeout: 15000 });
+      if (process.env.SHOTS) await card.screenshot({ path: path.join(process.env.SHOTS, 'cloud-reminders-card.png') });
+
+      const kv = proxyEnv.USAGE.m;
+      const subsKey = [...kv.keys()].find((k) => k.startsWith('p:subs:'));
+      const tripId = subsKey.slice('p:subs:'.length);
+      const subs = Object.values(JSON.parse(kv.get(subsKey)));
+      assert.equal(subs.length, 1);
+      assert.equal(subs[0].endpoint, 'https://fcm.googleapis.com/fcm/send/fake-phone');
+      assert.ok(!subs[0].kinds.includes('payment') && subs[0].kinds.includes('leave'));
+      const sched = async (re) => {
+        for (let i = 0; i < 60; i++) {
+          const v = kv.get(`p:sched:${tripId}`);
+          if (v && re.test(v)) return JSON.parse(v).reminders;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        throw new Error(`no reminder matching ${re}`);
+      };
+      const list = await sched(/Sistine/);
+      const vatican = list.find((r) => /Sistine/.test(r.title));
+
+      // Test message.
+      await card.getByRole('button', { name: 'Send a test' }).click();
+      await viewer.getByText('Test sent').waitFor();
+      assert.equal(pushes.length, 1);
+      assert.match(pushes[0].headers.authorization, /^vapid t=/);
+
+      // A change on another phone reaches the server's list too.
+      await addActivity(alice, 'Borghese Gallery', `${day(11)}T15:00`);
+      await sched(/Borghese/);
+
+      // When it's due, the cron sends it (once).
+      const { sendDue } = await import('../worker-loader.mjs');
+      const handler = await getProxy();
+      void handler;
+      const send = (now) => sendDue(proxyEnv, { now, fetchImpl: async (url, init) => { pushes.push({ url: String(url), headers: init.headers }); return new Response(null, { status: 201 }); } });
+      assert.ok((await send(vatican.at + 60000)).sent >= 1);
+      assert.equal((await send(vatican.at + 120000)).sent, 0);
+
+      // Opening a notification goes to that day of that trip.
+      await viewer.goto(`${BASE}#/today/${day(10)}/${tripId}`);
+      await viewer.getByText('Sistine Chapel').first().waitFor();
+
+      await viewer.goto(`${BASE}#/trip`);
+      await card.getByRole('button', { name: 'Turn off' }).click();
+      await card.getByRole('button', { name: /Turn on reminders/ }).waitFor();
+      assert.equal(kv.get(subsKey), undefined);
     });
 
     await check('viewer can remove the trip from their phone only', async () => {
