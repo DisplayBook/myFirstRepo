@@ -7,6 +7,11 @@ const Recognition = () => window.SpeechRecognition || window.webkitSpeechRecogni
 export const canListen = () => !!Recognition();
 export const canSpeak = () => 'speechSynthesis' in window && typeof window.SpeechSynthesisUtterance === 'function';
 
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const standalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+/** The phone's own voice gets stuck silently in iPhone Home Screen apps. */
+export const phoneVoiceWorks = () => canSpeak() && !(isIOS() && standalone());
+
 const lang = () => navigator.language || 'en-GB';
 
 /**
