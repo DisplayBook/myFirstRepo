@@ -36,6 +36,9 @@ class FakeKV {
 // Notifications the trip server sent (to the phones' push services).
 const pushes = [];
 const proxyEnv = { ANTHROPIC_API_KEY: 'sk-ant-server-key', ALLOWED_ORIGIN: `http://localhost:${PORT}`, FIREBASE_PROJECT_ID: 'demo-trips', USAGE: new FakeKV(), DAILY_LIMIT: '3' };
+// Workers AI text-to-speech (natural voice answers), simulated.
+const speechCalls = [];
+proxyEnv.AI = { run: async (model, inputs, opts) => { speechCalls.push({ model, inputs, opts }); return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x64, 1, 2]), { headers: { 'content-type': 'audio/mpeg' } }); } };
 let proxyHandler;
 async function getProxy() {
   if (proxyHandler) return proxyHandler;
@@ -112,6 +115,16 @@ async function main() {
       route.fulfill({ status: 200, contentType: 'text/javascript', body: fs.readFileSync(file) });
     });
     await context.route('**/travel-planner/js/config.js', (route) => route.fulfill({ contentType: 'text/javascript', body: CONFIG }));
+    // The phone's audio player: record what's played, and finish playing straight away.
+    await context.addInitScript(() => {
+      window.__played = [];
+      HTMLMediaElement.prototype.play = function play() {
+        window.__played.push(this.src.split(':')[0]);
+        if (this.src.startsWith('blob:')) setTimeout(() => this.dispatchEvent(new Event('ended')), 50);
+        return Promise.resolve();
+      };
+      HTMLMediaElement.prototype.pause = function pause() {};
+    });
     await context.route('https://trip-ai.test/**', async (route) => {
       const r = route.request();
       const handler = await getProxy();
@@ -337,7 +350,7 @@ async function main() {
 
       // Test message.
       await card.getByRole('button', { name: 'Send a test' }).click();
-      await viewer.getByText('Test sent').waitFor();
+      await viewer.getByText('Test sent: it should arrive').waitFor();
       assert.equal(pushes.length, 1);
       assert.match(pushes[0].headers.authorization, /^vapid t=/);
 
@@ -361,6 +374,43 @@ async function main() {
       await card.getByRole('button', { name: 'Turn off' }).click();
       await card.getByRole('button', { name: /Turn on reminders/ }).waitFor();
       assert.equal(kv.get(subsKey), undefined);
+    });
+
+    await check('natural voice: answers are read by the trip server\'s voice, chosen per phone', async () => {
+      await viewer.goto(`${BASE}#/trip`);
+      await viewer.locator('#toast').waitFor({ state: 'hidden' });
+      await viewer.locator('.voice-check').evaluate((d) => { d.open = true; });
+      await viewer.getByRole('button', { name: 'Test natural voice' }).click();
+      await viewer.locator('#voice-log li', { hasText: 'Finished' }).waitFor({ timeout: 15000 });
+      assert.equal(speechCalls.at(-1).model, '@cf/deepgram/aura-2-en');
+      assert.equal(speechCalls.at(-1).inputs.speaker, 'thalia', 'American English phone: American voice');
+      assert.deepEqual(await viewer.evaluate(() => window.__played), ['data', 'blob'], 'unlocked in the tap, then played');
+      await viewer.locator('select[name=voiceName]').selectOption('draco');
+      await viewer.locator('.voice-check').evaluate((d) => { d.open = true; });
+      await viewer.locator('#toast').waitFor({ state: 'hidden' });
+      await viewer.getByRole('button', { name: 'Test natural voice' }).click();
+      await viewer.locator('#voice-log li', { hasText: 'Finished' }).waitFor({ timeout: 15000 });
+      assert.equal(speechCalls.at(-1).inputs.speaker, 'draco');
+
+      // In the chat, Read aloud uses it, with the answer as plain sentences.
+      await viewer.getByRole('button', { name: 'Ask about this trip' }).click();
+      const before = speechCalls.length;
+      await viewer.locator('.msg.bot').first().getByRole('button', { name: 'Read this answer aloud' }).click();
+      for (let i = 0; i < 50 && speechCalls.length === before; i++) await viewer.waitForTimeout(100);
+      const said = speechCalls.at(-1).inputs.text;
+      assert.match(said, /10:00/);
+      assert.doesNotMatch(said, /\*\*/);
+      await viewer.locator('#sheet').getByRole('button', { name: 'Close' }).click();
+
+      // A server without voice set up says so.
+      const ai = proxyEnv.AI;
+      delete proxyEnv.AI;
+      await viewer.goto(`${BASE}#/trip`);
+      await viewer.locator('#toast').waitFor({ state: 'hidden' });
+      await viewer.locator('.voice-check').evaluate((d) => { d.open = true; });
+      await viewer.getByRole('button', { name: 'Test natural voice' }).click();
+      await viewer.locator('#voice-log li', { hasText: 'isn\'t set up for voice' }).waitFor({ timeout: 15000 });
+      proxyEnv.AI = ai;
     });
 
     await check('viewer can remove the trip from their phone only', async () => {

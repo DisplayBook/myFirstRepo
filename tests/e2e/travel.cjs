@@ -690,7 +690,7 @@ async function main() {
       // Voice check: plays a sentence and shows what the phone reports.
       await page.getByText('🔊 Test voice').click();
       await page.evaluate(() => { window.__spoken = []; });
-      await page.getByRole('button', { name: 'Test (simple)' }).click();
+      await page.getByRole('button', { name: 'Phone voice (simple)' }).click();
       await page.locator('#voice-log li', { hasText: 'Started speaking' }).waitFor();
       await page.locator('#voice-log li', { hasText: 'Finished' }).waitFor();
       assert.deepEqual(await page.evaluate(() => window.__spoken), ['This is a voice test from your trip planner.']);

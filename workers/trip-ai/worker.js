@@ -22,13 +22,15 @@
 //   Secret:    ANTHROPIC_API_KEY
 //   KV:        USAGE (needed for reminders; also the AI daily limit)
 //   Trigger:   cron "*/5 * * * *" (for reminders)
-//   Variables: ACCESS, DAILY_LIMIT (optional; defaults below)
+//   Binding:   AI (Workers AI), for natural-sounding voice answers (/v1/speech)
+//   Variables: ACCESS, DAILY_LIMIT, SPEECH_DAILY_LIMIT (optional; defaults below)
 
 const DEFAULTS = {
   FIREBASE_PROJECT_ID: 'my-travel-planner-57cef',
   ALLOWED_ORIGIN: 'https://displaybook.github.io',
   ACCESS: 'everyone',
   DAILY_LIMIT: '40',
+  SPEECH_DAILY_LIMIT: '150',
 };
 const ALLOWED_MODELS = ['claude-opus-5-5'];
 const MAX_TOKENS = 16000;
@@ -293,6 +295,55 @@ async function sendDue(env, { now = Date.now(), fetchImpl = (...a) => fetch(...a
   return { sent };
 }
 
+// ---------- voice answers (Workers AI text-to-speech) ----------
+
+const SPEECH_MODEL = '@cf/deepgram/aura-2-en';
+const VOICES = ['pandora', 'draco', 'thalia', 'apollo', 'theia', 'hyperion', 'helena', 'orion'];
+const MAX_SPEECH_CHARS = 2000;
+
+const base64ToBytes = (s) => Uint8Array.from(atob(String(s).replace(/\s+/g, '')), (c) => c.charCodeAt(0));
+
+/** Whatever Workers AI hands back → MP3 bytes. */
+async function audioBytes(result) {
+  if (!result) throw new Error('no audio');
+  if (result instanceof Response) {
+    if (!result.ok) throw new Error(`voice service said ${result.status}`);
+    if ((result.headers.get('content-type') || '').includes('json')) return audioBytes(await result.json());
+    return new Uint8Array(await result.arrayBuffer());
+  }
+  if (result instanceof ReadableStream) return new Uint8Array(await new Response(result).arrayBuffer());
+  if (result instanceof ArrayBuffer) return new Uint8Array(result);
+  if (ArrayBuffer.isView(result)) return new Uint8Array(result.buffer, result.byteOffset, result.byteLength);
+  if (typeof result === 'string') return base64ToBytes(result);
+  if (typeof result === 'object') {
+    const inner = result.audio ?? result.result?.audio ?? result.result;
+    if (inner && inner !== result) return audioBytes(inner);
+  }
+  throw new Error('unexpected audio format');
+}
+
+async function handleSpeech(body, { env, uid, cfg, cors }) {
+  if (!env.AI) return errorResponse(501, 'api_error', 'natural voice needs the Workers AI binding (AI) on the server', cors);
+  const text = String(body?.text || '').replace(/\s+/g, ' ').trim().slice(0, MAX_SPEECH_CHARS);
+  if (!text) return errorResponse(400, 'invalid_request_error', 'nothing to read', cors);
+  const speaker = VOICES.includes(body.voice) ? body.voice : 'thalia';
+  const limit = Number(cfg.SPEECH_DAILY_LIMIT) || 0;
+  if (env.USAGE && limit > 0) {
+    const k = `v:${uid}:${new Date().toISOString().slice(0, 10)}`;
+    const used = Number(await env.USAGE.get(k)) || 0;
+    if (used >= limit) return errorResponse(429, 'rate_limit_error', `this phone has used today's ${limit} spoken answers. It resets at midnight (UTC).`, cors);
+    await env.USAGE.put(k, String(used + 1), { expirationTtl: 2 * 86400 });
+  }
+  let bytes;
+  try {
+    bytes = await audioBytes(await env.AI.run(SPEECH_MODEL, { text, speaker, encoding: 'mp3' }, { returnRawResponse: true }));
+  } catch (e) {
+    return errorResponse(502, 'api_error', `the voice service failed (${e.message})`, cors);
+  }
+  if (!bytes.length) return errorResponse(502, 'api_error', 'the voice service returned no audio', cors);
+  return new Response(bytes, { headers: { ...cors, 'content-type': 'audio/mpeg', 'cache-control': 'no-store' } });
+}
+
 // ---------- handler ----------
 
 /**
@@ -326,8 +377,9 @@ function makeHandler(opts = {}) {
       if (!env.USAGE) return errorResponse(500, 'api_error', 'reminders need the USAGE KV binding on the server', cors);
       if (request.method === 'GET' && url.pathname === '/push/key') return jsonResponse({ key: (await vapidKeys(env.USAGE)).publicKey }, cors);
     }
-    if (request.method !== 'POST' || !(isPush || url.pathname === '/v1/messages')) return errorResponse(404, 'not_found_error', 'not found', cors);
-    if (!isPush && !env.ANTHROPIC_API_KEY) return errorResponse(500, 'api_error', 'the server has no Anthropic key yet (add the ANTHROPIC_API_KEY secret)', cors);
+    const isSpeech = url.pathname === '/v1/speech';
+    if (request.method !== 'POST' || !(isPush || isSpeech || url.pathname === '/v1/messages')) return errorResponse(404, 'not_found_error', 'not found', cors);
+    if (!isPush && !isSpeech && !env.ANTHROPIC_API_KEY) return errorResponse(500, 'api_error', 'the server has no Anthropic key yet (add the ANTHROPIC_API_KEY secret)', cors);
 
     // 1. Who is asking?
     const auth = request.headers.get('authorization') || '';
@@ -361,6 +413,12 @@ function makeHandler(opts = {}) {
       try { body = JSON.parse(raw); } catch { body = null; }
       if (!body || typeof body !== 'object') return errorResponse(400, 'invalid_request_error', 'request body must be JSON', cors);
       return handlePush(url.pathname, body, { kv: env.USAGE, tripId, cors, subject: cfg.PUSH_CONTACT || `${cfg.ALLOWED_ORIGIN}/`, fetchImpl });
+    }
+
+    if (isSpeech) {
+      let body = null;
+      try { body = JSON.parse((await request.text()).slice(0, 20000)); } catch { /* bad JSON */ }
+      return handleSpeech(body, { env, uid, cfg, cors });
     }
 
     // 3. Is it a request the app makes?
