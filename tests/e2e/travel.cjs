@@ -393,7 +393,7 @@ async function main() {
               from: { name: 'New York JFK (JFK)', search: 'JFK Airport, New York', terminal: 'Terminal 8', time: '19:00', date: '2026-12-05' },
               to: { name: 'London Heathrow (LHR)', search: 'Heathrow Airport, London', terminal: 'T5', time: '07:05', date: '' },
               aircraft: 'Boeing 777-300ER', note: '', source: 'FlightAware' },
-            report_packing_list: { items: [
+            report_packing_list: { summary: 'New York, 1–6 Dec: 0–5°C, chance of snow; Type A/B plugs.', items: [
               { name: 'Après-ski boots', category: 'clothes', who: 'each', qty: 1 },
               { name: 'Kids ski gloves', category: 'kids', who: 'Mia', qty: 1 },
               { name: 'US plug adapter', category: 'electronics', who: 'shared', qty: 2 },
@@ -812,6 +812,10 @@ async function main() {
       const sreq = calls.at(-1).body;
       assert.ok(sreq.tools.some((t) => t.name === 'report_packing_list'));
       assert.match(JSON.stringify(sreq.messages), /People: Alex, Mia/);
+      assert.match(JSON.stringify(sreq.messages), /Dates: Tue 1 Dec 2026 to Sun 6 Dec 2026/, 'trip dates are sent');
+      assert.match(JSON.stringify(sreq.messages), /Day by day/);
+      assert.match(JSON.stringify(sreq.messages), /Destinations to check the weather for: .*Hotel Pennsylvania/);
+      await page.locator('.pk-basis', { hasText: 'New York, 1–6 Dec: 0–5°C' }).waitFor();
       await page.locator('#pk-suggest .pk', { hasText: 'US plug adapter' }).getByRole('checkbox').uncheck();
       await page.getByRole('button', { name: 'Add selected' }).click();
       await page.getByText('3 items added').waitFor();

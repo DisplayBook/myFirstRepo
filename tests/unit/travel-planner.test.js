@@ -600,3 +600,24 @@ test('packing: progress, grouping, who-matching, templates and tool', () => {
   const ctx = buildTripContext({ meta: {}, items: [], packing: [{ kind: 'person', id: 'p1', name: 'Alex' }, ...items] });
   assert.match(ctx, /Alex: 2\/3 packed; still to pack: Gloves/);
 });
+
+test('packing suggestions are based on the trip: dates, season, day by day, stays, destinations, people', async () => {
+  const { packingTripContext } = await import('../../travel-planner/js/packing.js');
+  const its = [
+    { id: 'f', type: 'flight', provider: 'LH', number: '2485', from: { name: 'London Heathrow (LHR)' }, to: { name: 'Munich (MUC)' }, start: '2027-02-20T07:00', end: '2027-02-20T10:20' },
+    { id: 'h', type: 'hotel', title: 'Hotel Tirol', place: { name: 'Hotel Tirol, Kitzbühel, Austria' }, start: '2027-02-20T15:00', end: '2027-02-27T10:00' },
+    { id: 'a', type: 'activity', title: 'Ski school', place: { name: 'Hahnenkamm, Kitzbühel' }, start: '2027-02-21T09:00' },
+    { id: 'c', type: 'car', provider: 'Europcar', from: { name: 'Munich Airport' }, start: '2027-02-20T10:30', end: '2027-02-27T12:00' },
+  ];
+  const ctx = packingTripContext({ meta: { name: 'Ski week' }, items: its, packing: [{ id: 'p1', kind: 'person', name: 'Alex', at: '1' }, { id: 'i1', kind: 'item', who: 'p1', name: 'Helmet' }] });
+  assert.match(ctx, /Dates: Sat 20 Feb 2027 to Sat 27 Feb 2027 \(8 days, February 2027\)/);
+  assert.match(ctx, /- Sat 20 Feb: 07:00 Fly London Heathrow \(LHR\) → Munich \(MUC\);.*night at Hotel Tirol, Hotel Tirol, Kitzbühel, Austria/);
+  assert.match(ctx, /- Sun 21 Feb: 09:00 Ski school \(Hahnenkamm, Kitzbühel\)/);
+  assert.match(ctx, /Stays:\n- Hotel Tirol, Hotel Tirol, Kitzbühel, Austria: Sat 20 Feb to Sat 27 Feb \(7 nights\)/);
+  assert.match(ctx, /Destinations to check the weather for: .*Munich \(MUC\).*Kitzbühel/);
+  assert.match(ctx, /Planned activities: Ski school \(Sun 21 Feb\)/);
+  assert.match(ctx, /Getting around: flying .*, hire car/);
+  assert.match(ctx, /People: Alex/);
+  assert.match(ctx, /Already on the list: Helmet \(Alex\)/);
+  assert.match(packingTripContext({ meta: {}, items: [] }), /Dates: not set yet/);
+});
