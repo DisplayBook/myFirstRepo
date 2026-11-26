@@ -143,8 +143,75 @@ export const isSpeaking = () => canSpeak() && !!(window.speechSynthesis.speaking
 
 export function stopSpeaking() {
   session++;
+  stopAudio();
   if (canSpeak()) window.speechSynthesis.cancel();
 }
+
+// ---------- natural voice: audio made by the trip server ----------
+// Played like any other sound, which iPhones allow in Home Screen apps too,
+// once a tap has started the (single, reused) audio player.
+
+let player = null;
+let playerDone = null;
+const audioEl = () => {
+  if (!player) { player = new Audio(); player.preload = 'auto'; player.setAttribute('playsinline', ''); }
+  return player;
+};
+
+let silence = '';
+/** A tiny silent WAV, to start the audio player during a tap. */
+function silentWav() {
+  if (silence) return silence;
+  const n = 400;
+  const b = new Uint8Array(44 + n);
+  const v = new DataView(b.buffer);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+  w(36, 'data'); v.setUint32(40, n, true); b.fill(128, 44);
+  silence = `data:audio/wav;base64,${btoa(String.fromCharCode(...b))}`;
+  return silence;
+}
+
+/** Call in a tap, before fetching audio: lets the answer play when it arrives. */
+export function unlockAudio() {
+  audioMode('playback');
+  try {
+    const a = audioEl();
+    a.src = silentWav();
+    a.play()?.catch?.(() => {});
+  } catch { /* ignore */ }
+}
+
+/** Play MP3 audio (a Blob). Resolves when playback starts; onEnd when it finishes or stops. */
+export async function playAudio(blob, { onEnd } = {}) {
+  stopAudio();
+  audioMode('playback');
+  const a = audioEl();
+  const url = URL.createObjectURL(blob);
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    URL.revokeObjectURL(url);
+    if (playerDone === finish) playerDone = null;
+    onEnd?.();
+  };
+  playerDone = finish;
+  a.onended = finish;
+  a.onerror = finish;
+  a.src = url;
+  try { await a.play(); } catch (e) { finish(); throw e; }
+}
+
+export function stopAudio() {
+  if (!player) return;
+  try { player.pause(); } catch { /* ignore */ }
+  playerDone?.();
+}
+
+export const isPlaying = () => !!(player && !player.paused && !player.ended && playerDone);
 
 /**
  * Voice check for Trip → On this device: speaks a test sentence and reports

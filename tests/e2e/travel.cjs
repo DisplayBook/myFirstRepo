@@ -690,7 +690,7 @@ async function main() {
       // Voice check: plays a sentence and shows what the phone reports.
       await page.getByText('🔊 Test voice').click();
       await page.evaluate(() => { window.__spoken = []; });
-      await page.getByRole('button', { name: 'Test (simple)' }).click();
+      await page.getByRole('button', { name: 'Phone voice (simple)' }).click();
       await page.locator('#voice-log li', { hasText: 'Started speaking' }).waitFor();
       await page.locator('#voice-log li', { hasText: 'Finished' }).waitFor();
       assert.deepEqual(await page.evaluate(() => window.__spoken), ['This is a voice test from your trip planner.']);
@@ -906,6 +906,31 @@ async function main() {
       // Progress shows on the Plan card; persists after reload.
       await page.goto(`${BASE}#/plan`);
       await page.locator('.pack-card').getByText(/1 of \d+ packed/).waitFor();
+    });
+
+    await check('day strip keeps the selected day in view when moving with › and ‹', async () => {
+      const size = page.viewportSize();
+      await page.setViewportSize({ width: 300, height: size.height });
+      const inView = async () => page.evaluate(() => {
+        const strip = document.querySelector('.daystrip');
+        const sel = strip.querySelector('a.sel').getBoundingClientRect();
+        const box = strip.getBoundingClientRect();
+        return sel.left >= box.left - 1 && sel.right <= box.right + 1;
+      });
+      await page.goto(`${BASE}#/today/2026-12-01`);
+      assert.ok(await page.evaluate(() => document.querySelector('.daystrip').scrollWidth > document.querySelector('.daystrip').clientWidth), 'strip overflows');
+      for (const d of ['02', '03', '04', '05', '06']) {
+        await page.getByRole('link', { name: 'Next day' }).click();
+        await page.locator(`.daystrip a.sel[href$="2026-12-${d}"]`).waitFor();
+        assert.ok(await inView(), `Dec ${d} visible`);
+      }
+      await page.getByRole('link', { name: 'Previous day' }).click();
+      await page.getByRole('link', { name: 'Previous day' }).click();
+      await page.getByRole('link', { name: 'Previous day' }).click();
+      await page.getByRole('link', { name: 'Previous day' }).click();
+      await page.locator('.daystrip a.sel[href$="2026-12-02"]').waitFor();
+      assert.ok(await inView(), 'Dec 02 visible going back');
+      await page.setViewportSize(size);
     });
 
     await check('layout fits a phone screen (no sideways scroll)', async () => {

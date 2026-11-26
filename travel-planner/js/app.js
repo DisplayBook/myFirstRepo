@@ -494,7 +494,25 @@ function renderToday(arg) {
     ${ag.tonight ? `<p class="tonight">🌙 Tonight: <strong>${esc(ag.tonight.title)}</strong>${ag.tonight.place?.name ? ` · ${esc(shortName(ag.tonight.place))}` : ''}</p>` : ''}
     <p class="hint muted">Drive times are estimates without live traffic, plus ${bufferPct()}% buffer (change in Trip).</p>
     <section class="card brief" id="brief" data-day="${esc(day)}">${briefHtml(day)}</section>`;
+  centerDayStrip($('.daystrip', main));
   fillLegs(legs, main);
+}
+
+/** Keep the selected day in view in the day strip (centred), and let a mouse wheel scroll it sideways. */
+function centerDayStrip(strip) {
+  if (!strip) return;
+  const sel = $('a.sel', strip);
+  if (sel) {
+    const offset = sel.getBoundingClientRect().left - strip.getBoundingClientRect().left;
+    strip.scrollLeft = Math.max(0, strip.scrollLeft + offset - (strip.clientWidth - sel.offsetWidth) / 2);
+  }
+  strip.addEventListener('wheel', (e) => {
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX) || strip.scrollWidth <= strip.clientWidth) return;
+    const max = strip.scrollWidth - strip.clientWidth;
+    if ((e.deltaY < 0 && strip.scrollLeft <= 0) || (e.deltaY > 0 && strip.scrollLeft >= max)) return; // let the page scroll at the ends
+    e.preventDefault();
+    strip.scrollLeft += e.deltaY;
+  }, { passive: false });
 }
 
 // ---------- live checks & day summary (Claude + web search) ----------
@@ -1338,11 +1356,16 @@ function renderTripSettings() {
           <label>Distances<select name="unit"><option value="km">km</option><option value="mi" ${S.settings.unit === 'mi' ? 'selected' : ''}>miles</option></select></label>
           <label>Directions open in<select name="maps"><option value="google">Google Maps</option><option value="apple" ${S.settings.maps === 'apple' ? 'selected' : ''}>Apple Maps</option></select></label>
           <label>Answers to 🎤 questions<select name="voiceReplies"><option value="1">Read aloud</option><option value="0" ${S.settings.voiceReplies === false ? 'selected' : ''}>Text only</option></select></label>
+          <label class="span2">Voice<select name="voiceName">
+            ${aiProxyUrl ? `<option value="">Natural (${esc(NATURAL_VOICES.find(([k]) => k === voiceId())?.[1] || 'automatic')})</option>
+            ${NATURAL_VOICES.map(([k, label]) => `<option value="${k}" ${S.settings.voiceName === k ? 'selected' : ''}>Natural: ${esc(label)}</option>`).join('')}` : ''}
+            <option value="phone" ${S.settings.voiceName === 'phone' || !aiProxyUrl ? 'selected' : ''}>Phone's built-in voice</option></select></label>
         </div>
         <details class="small voice-check"><summary>🔊 Test voice</summary>
-          <p class="muted">Plays a test sentence and shows what the phone reports. Turn the silent switch off first.</p>
-          <div class="row"><button type="button" class="btn ghost small" data-voice-test="chat">Test (as in chat)</button>
-          <button type="button" class="btn ghost small" data-voice-test="plain">Test (simple)</button></div>
+          <p class="muted">Plays a test sentence. Natural voices come from the trip server and work on shared trips; the phone's own voice can sound robotic and doesn't work in Home Screen apps on some iPhones.</p>
+          <div class="row">${aiProxyUrl ? '<button type="button" class="btn ghost small" data-voice-test="natural">Test natural voice</button>' : ''}
+          <button type="button" class="btn ghost small" data-voice-test="chat">Test phone voice</button>
+          <button type="button" class="btn ghost small" data-voice-test="plain">Phone voice (simple)</button></div>
           <ol class="voice-log" id="voice-log" aria-live="polite"></ol>
         </details>
       </form>
@@ -1421,12 +1444,24 @@ function renderTripSettings() {
     b.onclick = () => {
       const out = $('#voice-log');
       out.innerHTML = '';
-      voice.voiceTest({ plain: b.dataset.voiceTest === 'plain', onLog: (t) => { if (out.isConnected) out.insertAdjacentHTML('beforeend', `<li>${esc(t)}</li>`); } });
+      const add = (t) => { if (out.isConnected) out.insertAdjacentHTML('beforeend', `<li>${esc(t)}</li>`); };
+      if (b.dataset.voiceTest !== 'natural') { voice.voiceTest({ plain: b.dataset.voiceTest === 'plain', onLog: add }); return; }
+      if (S.trip.kind !== 'cloud') { add('Natural voices work on shared trips.'); return; }
+      voice.stopSpeaking();
+      voice.unlockAudio();
+      const name = voiceId();
+      add(`Asking the trip server for the ${NATURAL_VOICES.find(([k]) => k === name)?.[1] || name} voice…`);
+      fetchSpeech('Hello! This is the voice that will read your trip answers.', name)
+        .then((blob) => { add(`Got ${Math.round(blob.size / 1024)} KB of audio. Playing…`); return voice.playAudio(blob, { onEnd: () => add('✅ Finished. Did you hear it?') }); })
+        .catch((e) => add(e.status === 501 || e.status === 404
+          ? '❌ The trip server isn\'t set up for voice yet (it needs the Workers AI binding and the latest worker code).'
+          : e.name === 'NotAllowedError' ? '❌ The phone blocked playback. Tap the button again.' : `❌ ${e.message}`));
     };
   });
   $('#prefs').onchange = (e) => {
     const fd = new FormData(e.currentTarget);
-    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps'), voiceReplies: fd.get('voiceReplies') !== '0' });
+    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps'), voiceReplies: fd.get('voiceReplies') !== '0', voiceName: fd.get('voiceName') || '' });
+    if (e.target.name === 'voiceName') naturalMissing = false;
   };
   if (cloud) {
     let code = '';
@@ -2311,8 +2346,66 @@ let chatListening = null; // the open microphone, if any
 function chatVoiceOff() {
   chatListening?.stop();
   chatListening = null;
-  voice.stopSpeaking();
+  stopReading();
 }
+// Voice answers: natural voices made by the trip server (Workers AI), or the
+// phone's own voice for device-only trips, older servers, or by choice.
+const NATURAL_VOICES = [
+  ['pandora', 'British woman'], ['draco', 'British man'], ['thalia', 'American woman'],
+  ['apollo', 'American man'], ['theia', 'Australian woman'], ['hyperion', 'Australian man'],
+];
+let naturalMissing = false; // the trip server said it has no voice set up
+const naturalVoice = () => !!(aiProxyUrl && S.trip?.kind === 'cloud' && S.settings.voiceName !== 'phone' && !naturalMissing);
+function voiceId() {
+  if (NATURAL_VOICES.some(([k]) => k === S.settings.voiceName)) return S.settings.voiceName;
+  const l = (navigator.language || '').toLowerCase();
+  return l.startsWith('en-gb') || l.startsWith('en-ie') ? 'pandora' : l.startsWith('en-au') || l.startsWith('en-nz') ? 'theia' : 'thalia';
+}
+async function fetchSpeech(text, voiceName = voiceId()) {
+  const res = await fetch(`${aiProxyUrl}/v1/speech`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${await store.idToken()}`, 'x-trip-id': S.trip.id },
+    body: JSON.stringify({ text, voice: voiceName }),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    const e = new Error(String(d.error?.message || `Voice error ${res.status}`).replace(/^Trip AI: /, ''));
+    e.status = res.status;
+    throw e;
+  }
+  return res.blob();
+}
+/** Call in the tap that will lead to reading something aloud. */
+function unlockVoice() {
+  if (naturalVoice()) { voice.stopSpeaking(); voice.unlockAudio(); return; }
+  // Phone voice: something already playing means it's unlocked; else unlock it now.
+  if (voice.isSpeaking()) voice.stopSpeaking(); else voice.unlockSpeech();
+}
+let readSeq = 0;
+/** Read an answer aloud. onEnd when it finishes, is stopped, or can't play. */
+async function readAloud(text, { onEnd } = {}) {
+  const seq = ++readSeq;
+  const plain = speakableText(text);
+  if (naturalVoice()) {
+    try {
+      const blob = await fetchSpeech(plain);
+      if (seq !== readSeq) { onEnd?.(); return; }
+      await voice.playAudio(blob, { onEnd });
+      return;
+    } catch (e) {
+      if (seq !== readSeq) { onEnd?.(); return; }
+      if (e.status === 501 || e.status === 404) naturalMissing = true; // server not set up for voice yet: use the phone's
+      else {
+        onEnd?.();
+        toast(e.name === 'NotAllowedError' ? 'Tap 🔊 Read aloud to hear the answer' : e.message);
+        return;
+      }
+    }
+  }
+  voice.speak(plain, { onEnd });
+}
+function stopReading() { readSeq++; voice.stopSpeaking(); }
+
 const VOICE_ERRORS = {
   'not-allowed': 'Microphone access is off for this app. Allow it in your phone\'s Settings, or tap the 🎤 on your keyboard to dictate.',
   'service-not-allowed': 'Voice questions aren\'t available in this app on this phone. Tap the 🎤 on your keyboard to dictate instead.',
@@ -2394,9 +2487,9 @@ function openChat() {
   const PLACEHOLDER = q.placeholder;
   const say = (text) => {
     stopBtn.hidden = false;
-    voice.speak(speakableText(text), { onEnd: () => { if (stopBtn.isConnected) stopBtn.hidden = true; } });
+    readAloud(text, { onEnd: () => { if (stopBtn.isConnected) stopBtn.hidden = true; } });
   };
-  stopBtn.onclick = () => { voice.stopSpeaking(); stopBtn.hidden = true; };
+  stopBtn.onclick = () => { stopReading(); stopBtn.hidden = true; };
   const micState = (on) => {
     mic.classList.toggle('on', on);
     mic.setAttribute('aria-pressed', String(on));
@@ -2407,8 +2500,8 @@ function openChat() {
     if (chatListening) { chatListening.stop(); return; }
     if (chatAbort) return;
     if (!voice.canListen()) { toast(VOICE_ERRORS.unsupported); q.focus(); return; }
-    // Something already playing means speech is unlocked; otherwise unlock it in this tap.
-    if (voice.isSpeaking()) voice.stopSpeaking(); else voice.unlockSpeech();
+    readSeq++;
+    unlockVoice();
     stopBtn.hidden = true;
     q.value = '';
     micState(true);
@@ -2442,7 +2535,9 @@ function openChat() {
     const r = e.target.closest('[data-chat-speak]');
     if (!r) return;
     const m = chatLoad()[Number(r.dataset.chatSpeak)];
-    if (m?.text) say(m.text);
+    if (!m?.text) return;
+    unlockVoice();
+    say(m.text);
   });
   log.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-chat-save], [data-chat-plan]');
