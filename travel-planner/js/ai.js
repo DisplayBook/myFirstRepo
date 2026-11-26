@@ -5,7 +5,7 @@
 // the person saved on this device (Trip tab). The key never goes into the shared
 // trip data. The Anthropic SDK is vendored (vendor/anthropic) and loaded on first use.
 
-import { TYPES, addDays, datePart, timePart } from './logic.js';
+import { TYPES, addDays, datePart, timePart, daysBetween } from './logic.js';
 import { parseAmount } from './budget.js';
 
 export const MODEL = 'claude-opus-5-5';
@@ -411,7 +411,8 @@ export const FLIGHT_LOOKUP_TOOL = {
   description: 'Report the scheduled details of the flight after searching. Call this exactly once.',
   strict: true,
   input_schema: obj({
-    found: { type: 'boolean', description: 'False if this flight number doesn\'t operate on that date or nothing reliable was found.' },
+    found: { type: 'boolean', description: 'False only if no reliable schedule for this flight number could be found at all.' },
+    basis: { type: 'string', enum: ['exact_date', 'regular_schedule'], description: 'exact_date: sources list this flight on the requested date. regular_schedule: the date is too far ahead to be listed, so these are the flight\'s usual route, times and terminals.' },
     airline: str('Operating/marketing airline name, e.g. "British Airways"'),
     flightNumber: str('Flight number as printed, e.g. "BA 117"'),
     from: AIRPORT('Departure'),
@@ -426,7 +427,7 @@ export const FLIGHT_LOOKUP_TOOL = {
 export function flightDetails(auth, { number, date, now }, opts = {}) {
   return searchAndReport(auth, {
     ...opts,
-    system: 'You look up airline flight schedules on the web (airline sites, FlightAware, Flightradar24, airport departure pages). Report the scheduled departure and arrival for this flight number on this date: airports with IATA codes, local times and dates, and terminals. Use the local time at each airport. If the flight has several legs, report the leg departing on this date (the first one) and say so in the note. Only report what the sources say; if unsure, set found to false.',
+    system: 'You look up airline flight schedules on the web (airline sites, FlightAware, Flightradar24, airport departure pages). Report the scheduled departure and arrival for this flight number: airports with IATA codes, local times, and terminals. Use the local time at each airport. Flight trackers only list flights a few days ahead, so for dates further out use the flight\'s regular schedule (recent operations or the airline timetable for that season) and set basis to regular_schedule; mention in the note if the time varies by day of week or season. If the flight has several legs, report the first leg and say so in the note. Set found to false only if you can\'t find this flight number at all. Don\'t invent details the sources don\'t give.',
     prompt: `Flight ${number} on ${date}. Today is ${now}. Find its scheduled details and call report_flight_details.`,
     tool: FLIGHT_LOOKUP_TOOL,
     maxSearches: 4,
@@ -445,6 +446,10 @@ export function normalizeFlightLookup(raw, date) {
   const f = place(raw.from), t = place(raw.to);
   if (f) out.from = f;
   if (t) out.to = t;
+  // A usual schedule applies to the requested date; keep any next-day arrival offset.
+  const usual = raw.basis === 'regular_schedule';
+  const offset = ymd(raw.from?.date) && ymd(raw.to?.date) ? Math.max(0, Math.min(2, daysBetween(raw.from.date, raw.to.date))) : null;
+  if (usual && raw.from) raw = { ...raw, from: { ...raw.from, date }, to: { ...raw.to, date: offset !== null ? addDays(date, offset) : '' } };
   const depDate = ymd(raw.from?.date) || date;
   const depTime = hhmm(raw.from?.time);
   if (depDate && depTime) out.start = `${depDate}T${depTime}`;
@@ -463,6 +468,7 @@ export function normalizeFlightLookup(raw, date) {
   if (term(raw.to?.terminal)) out.arrTerminal = term(raw.to.terminal);
   const notes = [raw.aircraft && `Aircraft: ${String(raw.aircraft).trim()}`, String(raw.note || '').trim()].filter(Boolean).join('. ');
   if (notes) out.notes = notes.slice(0, 500);
+  if (usual) out.usualSchedule = true;
   return out;
 }
 

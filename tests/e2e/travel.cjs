@@ -397,7 +397,14 @@ async function main() {
               { name: 'Bryant Park Winter Village', category: 'event', why: 'Ice skating close by.', when: 'After 16:00', address: 'Bryant Park, New York' },
             ] },
           };
-          await msg([...search, { type: 'tool_use', id: `toolu_${calls.length}`, name: report, input: inputs[report] }], 'tool_use');
+          let input = inputs[report];
+          // A date far ahead: the lookup falls back to the flight's usual schedule.
+          if (report === 'report_flight_details' && /2027-08-21/.test(JSON.stringify(body.messages))) {
+            input = { ...input, basis: 'regular_schedule', airline: 'Lufthansa', flightNumber: 'LH 2485',
+              from: { name: 'Munich (MUC)', search: 'Munich Airport', terminal: '2', time: '21:40', date: '2026-11-24' },
+              to: { name: 'London Heathrow (LHR)', search: 'Heathrow Airport, London', terminal: '2', time: '22:45', date: '2026-11-24' } };
+          }
+          await msg([...search, { type: 'tool_use', id: `toolu_${calls.length}`, name: report, input }], 'tool_use');
           return;
         }
         const text = body.output_config?.format
@@ -642,6 +649,16 @@ async function main() {
       assert.equal(await tile.locator('.ev-icon').textContent(), '🛫', 'take-off icon on departure');
       await page.goto(`${BASE}#/today/2026-12-06`);
       await page.locator('.ev', { hasText: 'Arrive London Heathrow' }).getByText('Terminal 5').waitFor();
+      // Far-ahead dates use the usual schedule, clearly flagged.
+      await page.getByRole('button', { name: 'Add to the plan' }).click();
+      await page.locator('.typegrid').getByRole('button', { name: 'Flight', exact: true }).click();
+      await page.locator('#fl-number').fill('lh2485');
+      await page.locator('#fl-date').fill('2027-08-21');
+      await page.getByRole('button', { name: /Find flight/ }).click();
+      await page.getByText(/Filled in from the flight's usual schedule \(FlightAware\)\. Sat 21 Aug is too far ahead/).waitFor();
+      assert.equal(await page.getByLabel('Departs').inputValue(), '2027-08-21T21:40');
+      assert.equal(await page.getByLabel('Arrives').inputValue(), '2027-08-21T22:45');
+      await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
       assert.equal(await page.locator('.ev', { hasText: 'Arrive London Heathrow' }).locator('.ev-icon').textContent(), '🛬', 'landing icon on arrival');
     });
 

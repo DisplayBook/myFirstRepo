@@ -1463,7 +1463,7 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
       status.textContent = `⏳ Looking up ${number} on ${fmtDate(date)}… (up to a minute)`;
       try {
         const raw = await flightDetails(await aiAuth(), { number, date, now: localDateTime() });
-        const found = normalizeFlightLookup(raw, date);
+        const { usualSchedule, ...found } = normalizeFlightLookup(raw, date);
         if (!found.start) {
           status.className = 'error small';
           status.textContent = `Couldn't find ${number} on ${fmtDate(date)}. Check the number and date, or fill in the details below.`;
@@ -1484,7 +1484,7 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
         if (found.notes && keep.notes && !keep.notes.includes(found.notes)) merged.notes = `${keep.notes}\n${found.notes}`;
         openItemForm('flight', existing, existing ? merged : { ...merged, id: draft.id }, {
           docs: pending.map(({ id, ...p }) => p), onSaved,
-          lookup: { ok: true, source: raw.source, number: merged.number, date },
+          lookup: { ok: true, source: raw.source, number: merged.number, date, usual: !!usualSchedule },
         });
       } catch (err) {
         status.className = 'error small';
@@ -1820,8 +1820,10 @@ function flightLookupHtml(draft, existing, lookup) {
         <label><span>Flight date</span><input id="fl-date" type="date" value="${esc(date)}"></label>
       </div>
       <button type="button" class="btn" id="fl-go">🔎 Find flight</button>
-      <p id="fl-status" class="${lookup?.ok ? 'ok' : 'muted'} small" role="status" aria-live="polite">${lookup?.ok
-        ? `✓ Filled in${lookup.source ? ` from ${esc(lookup.source)}` : ''}. Check the details below, then Save.`
+      <p id="fl-status" class="${lookup?.ok ? (lookup.usual ? 'warn-text' : 'ok') : 'muted'} small" role="status" aria-live="polite">${lookup?.ok
+        ? lookup.usual
+          ? `✓ Filled in from the flight's usual schedule${lookup.source ? ` (${esc(lookup.source)})` : ''}. ${esc(fmtDate(lookup.date))} is too far ahead to be listed yet, so check the times against your booking.`
+          : `✓ Filled in${lookup.source ? ` from ${esc(lookup.source)}` : ''}. Check the details below, then Save.`
         : 'Fills in the airline, airports, times and terminals from the web.'}</p>
     </div>`;
   if (existing && !lookup) return `<details class="lookup-wrap"><summary>🔎 Update from the flight number</summary>${box}</details>`;
