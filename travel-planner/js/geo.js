@@ -102,3 +102,25 @@ export function currentPosition() {
     );
   });
 }
+
+/** Main roads on a driving route, longest first (e.g. ["M4", "A46"]). Cached. */
+export async function routeRoads(a, b, max = 6) {
+  if (!hasCoords(a) || !hasCoords(b)) return [];
+  const k = `roads:${key(a, b)}`;
+  try { const c = JSON.parse(localStorage.getItem(k)); if (Array.isArray(c)) return c; } catch { /* ignore */ }
+  const url = `${OSRM}${(+a.lon).toFixed(6)},${(+a.lat).toFixed(6)};${(+b.lon).toFixed(6)},${(+b.lat).toFixed(6)}?overview=false&steps=true`;
+  const res = await routeQueue(() => fetch(url));
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.code !== 'Ok') return [];
+  const byRoad = new Map();
+  for (const leg of data.routes[0].legs || []) {
+    for (const st of leg.steps || []) {
+      const label = (st.ref || st.name || '').split(';')[0].trim();
+      if (!label) continue;
+      byRoad.set(label, (byRoad.get(label) || 0) + st.distance);
+    }
+  }
+  const roads = [...byRoad.entries()].filter(([, m]) => m >= 2000).sort((x, y) => y[1] - x[1]).slice(0, max).map(([r]) => r);
+  try { localStorage.setItem(k, JSON.stringify(roads)); } catch { /* ignore */ }
+  return roads;
+}

@@ -357,3 +357,32 @@ test('scan: deposits and balance-due dates are read from confirmations', () => {
   assert.equal(c.deposit, undefined, 'paid in full ignores the deposit');
   assert.equal(c.balanceDue, undefined);
 });
+
+// ---------- live checks & day summary ----------
+import { FLIGHT_STATUS_TOOL, ROAD_TOOL, DAY_BRIEF_TOOL, guessTime } from '../../travel-planner/js/ai.js';
+
+test('live checks: report tools are strict (every property required, no extras)', () => {
+  const check = (s, path) => {
+    if (s.type === 'object') {
+      assert.equal(s.additionalProperties, false, `${path} must forbid extra properties`);
+      assert.deepEqual([...s.required].sort(), Object.keys(s.properties).sort(), `${path} must require every property`);
+      for (const [k, v] of Object.entries(s.properties)) check(v, `${path}.${k}`);
+    } else if (s.type === 'array') check(s.items, `${path}[]`);
+  };
+  for (const t of [FLIGHT_STATUS_TOOL, ROAD_TOOL, DAY_BRIEF_TOOL]) {
+    assert.equal(t.strict, true);
+    assert.match(t.name, /^report_/);
+    check(t.input_schema, t.name);
+  }
+});
+
+test('day summary: suggestion times', () => {
+  assert.equal(guessTime('Lunch'), '12:30');
+  assert.equal(guessTime('After 16:00'), '16:00');
+  assert.equal(guessTime('around 7pm'), '19:00');
+  assert.equal(guessTime('12am'), '00:00');
+  assert.equal(guessTime('Dinner'), '19:00');
+  assert.equal(guessTime('Evening'), '18:00');
+  assert.equal(guessTime('Breakfast'), '08:30');
+  assert.equal(guessTime(''), '10:00');
+});
