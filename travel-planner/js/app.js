@@ -2394,8 +2394,9 @@ function openChat() {
     if (chatListening) { chatListening.stop(); return; }
     if (chatAbort) return;
     if (!voice.canListen()) { toast(VOICE_ERRORS.unsupported); q.focus(); return; }
-    voice.stopSpeaking(); stopBtn.hidden = true;
-    voice.unlockSpeech();
+    // Something already playing means speech is unlocked; otherwise unlock it in this tap.
+    if (voice.isSpeaking()) voice.stopSpeaking(); else voice.unlockSpeech();
+    stopBtn.hidden = true;
     q.value = '';
     micState(true);
     chatListening = voice.listen({

@@ -90,7 +90,9 @@ async function main() {
       window.SpeechRecognition = FakeRecognition;
       window.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) { this.text = text; };
       Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
-        speak(u) { if (u.text.trim()) window.__spoken.push(u.text); setTimeout(() => u.onend?.(), 30); }, cancel() {}, getVoices() { return []; },
+        speaking: false, pending: false, paused: false,
+        // Silent utterances (the tap-to-unlock) aren't heard, so aren't recorded.
+        speak(u) { if (u.text.trim() && u.volume !== 0) window.__spoken.push(u.text); setTimeout(() => u.onend?.(), 30); }, cancel() {}, getVoices() { return []; },
       } });
     });
     const page = await context.newPage();
@@ -661,13 +663,13 @@ async function main() {
       const req = calls.filter((c) => c.body.stream)[before].body;
       assert.match(JSON.stringify(req.messages.at(-1).content), /Asked by voice/, 'asks for a short spoken answer');
       await page.waitForFunction(() => window.__spoken.some((t) => /Katz/.test(t)));
-      const said = await page.evaluate(() => window.__spoken.find((t) => /Katz/.test(t)));
+      const said = await page.evaluate(() => window.__spoken.join(' '));
       assert.doesNotMatch(said, /\*\*|\n|^- /m, 'read as plain sentences');
       assert.match(said, /Katz's Delicatessen for lunch\./);
       // Any answer can be read again; the saved question has no voice note.
       await page.evaluate(() => { window.__spoken = []; });
       await page.locator('.msg.bot').last().getByRole('button', { name: 'Read this answer aloud' }).click();
-      await page.waitForFunction(() => window.__spoken.length === 1);
+      await page.waitForFunction(() => window.__spoken.join(' ').includes('Top of the Rock'));
       assert.doesNotMatch(await page.evaluate(() => localStorage.getItem(Object.keys(localStorage).find((k) => k.startsWith('tp:chat:')))), /Asked by voice/);
       await shot(page, '17-voice');
       // Text only: answers to voice questions aren't read out.

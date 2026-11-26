@@ -672,3 +672,11 @@ test('voice: answers are read aloud as plain sentences', async () => {
   assert.equal(speakableText('| a | b |\n|---|---|\n| 1 | 2 |\nDone'), 'Done');
   assert.match(VOICE_NOTE, /read aloud/);
 });
+
+test('voice: long answers are read sentence by sentence', async () => {
+  globalThis.window = globalThis.window || {};
+  const { speechChunks } = await import('../../travel-planner/js/voice.js');
+  assert.deepEqual(speechChunks('Your ref is HP-778. Check-in from 15:00! Enjoy', 30), ['Your ref is HP-778.', 'Check-in from 15:00! Enjoy']);
+  assert.deepEqual(speechChunks('Short.'), ['Short.']);
+  assert.ok(speechChunks('x'.repeat(500), 220).every((c) => c.length <= 220));
+});
