@@ -274,6 +274,10 @@ function evIcon(ev) {
   return TYPES[ev.item.type].icon;
 }
 
+const tilesToggle = ({ refresh = false } = {}) => `<div class="tiles-toggle">
+  ${refresh ? '<button type="button" class="link small" data-refresh>↻ Refresh</button>' : ''}
+  <button type="button" class="link small" data-tiles="${tilesFull() ? 'compact' : 'full'}">${tilesFull() ? '⌃ Collapse all' : '⌄ Expand all'}</button></div>`;
+
 const docCount = (itemId) => S.files.filter((f) => f.itemId === itemId).length;
 
 /** Where to go for an event (none for arrivals: you get there by the flight/train). */
@@ -283,24 +287,60 @@ function eventDestination(ev) {
   return p && (hasCoords(p) || p.name) ? p : null;
 }
 
+// ---------- compact / expanded tiles ----------
+// Tiles show the essentials; ⌄ expands one, "Expand all" switches the mode.
+// The mode is a per-phone setting; single tiles opened the other way are
+// remembered in `tp:flipped` until the mode changes.
+const FLIP_KEY = 'tp:flipped';
+const flipped = new Set((() => { try { return JSON.parse(localStorage.getItem(FLIP_KEY)) || []; } catch { return []; } })());
+const saveFlipped = () => { try { localStorage.setItem(FLIP_KEY, JSON.stringify([...flipped].slice(-300))); } catch { /* ignore */ } };
+const tilesFull = () => S.settings.tiles === 'full';
+const evKey = (ev) => `${ev.item.id}:${ev.kind}`;
+const isExpanded = (ev) => tilesFull() !== flipped.has(evKey(ev));
+
+/** One-line live headline for a compact tile, if a check has been run. */
+function liveChip(ev) {
+  const it = ev.item;
+  const kind = it.type === 'flight' && ev.kind === 'depart' ? 'flight' : it.type === 'drive' ? 'road' : '';
+  const c = kind && liveGet(liveKey(kind, it));
+  if (!c) return '';
+  const d = c.data;
+  if (kind === 'flight') {
+    if (!d.found) return '';
+    const late = d.delayMinutes >= 15 || d.status === 'delayed';
+    const map = { cancelled: ['🔴', 'Cancelled', 'bad'], diverted: ['🔴', 'Diverted', 'bad'], departed: ['🔵', 'Departed', ''], in_air: ['🔵', 'In the air', ''], landed: ['🔵', 'Landed', ''], boarding: ['🟢', 'Boarding', 'ok'] };
+    const [dot, text, cls] = map[d.status] || (late ? ['🟠', `Delayed${d.delayMinutes ? ` ${fmtDuration(d.delayMinutes)}` : ''}`, 'warn'] : ['🟢', 'On time', 'ok']);
+    return `<span class="ev-chip ${cls}">${dot} ${esc(text)}${d.depGate ? ` · Gate ${esc(d.depGate)}` : ''}</span>`;
+  }
+  const lv = { none: ['🟢', 'No known delays', 'ok'], minor: ['🟠', 'Some delays possible', 'warn'], major: ['🔴', 'Major disruption', 'bad'] }[d.level];
+  return lv ? `<span class="ev-chip ${lv[2]}">${lv[0]} ${esc(lv[1])}</span>` : '';
+}
+
 function eventRow(ev, { live = false } = {}) {
   const def = TYPES[ev.item.type];
-  const dest = live ? eventDestination(ev) : null;
+  const open = isExpanded(ev);
+  const dest = live && open ? eventDestination(ev) : null;
   const goBox = dest ? `<div class="ev-go"><a href="${esc(directionsUrl(null, dest))}" target="_blank" rel="noopener" aria-label="Directions to ${esc(dest.name || 'this place')}">🧭 Directions${shortName(dest) ? ` to ${esc(shortName(dest))}` : ''}</a></div>` : '';
-  const liveBox = live ? liveHtml(ev) : '';
+  const liveBox = live && open ? liveHtml(ev) : '';
   const time = timePart(ev.at);
+  const meta = eventMeta(ev);
+  const isMain = ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind);
+  const hasMore = meta.length > 1 || docCount(ev.item.id) || (ev.item.notes && isMain) || (live && (eventDestination(ev) || liveHtml(ev)));
   const endT = ev.endAt && ev.kind === 'activity' ? `–${t12(timePart(ev.endAt))}` : '';
-  return `<li class="ev" style="--c:${def.color}" data-item="${esc(ev.item.id)}">
+  return `<li class="ev ${open ? 'open' : 'compact'}" style="--c:${def.color}" data-item="${esc(ev.item.id)}">
     ${canEdit() ? `<button type="button" class="swipe-del" data-item="${esc(ev.item.id)}" tabindex="-1" aria-label="Delete ${esc(itemTitle(ev.item))}">Delete</button>` : ''}
     <button type="button" class="ev-btn" data-edit="${esc(ev.item.id)}" aria-label="${esc(`${t12(time)} ${ev.label}. Edit`)}">
       <span class="ev-time">${esc(t12(time))}<small>${esc(endT)}</small></span>
       <span class="ev-icon" aria-hidden="true">${evIcon(ev)}</span>
       <span class="ev-body"><strong>${esc(ev.label)}</strong>
-        ${eventMeta(ev).map((b) => `<span class="ev-meta">${esc(b)}</span>`).join('')}
-        ${docCount(ev.item.id) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-docs">📎 ${docCount(ev.item.id)} document${docCount(ev.item.id) === 1 ? '' : 's'}</span>` : ''}
-        ${ev.item.notes && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-notes">${esc(ev.item.notes)}</span>` : ''}
+        ${(open ? meta : meta.slice(0, 1)).map((b) => `<span class="ev-meta">${esc(b)}</span>`).join('')}
+        ${!open ? liveChip(ev) : ''}
+        ${open && docCount(ev.item.id) && isMain ? `<span class="ev-docs">📎 ${docCount(ev.item.id)} document${docCount(ev.item.id) === 1 ? '' : 's'}</span>` : ''}
+        ${open && ev.item.notes && isMain ? `<span class="ev-notes">${esc(ev.item.notes)}</span>` : ''}
       </span>
-    </button>${goBox}${liveBox}</li>`;
+    </button>
+    ${hasMore ? `<button type="button" class="ev-more" data-expand="${esc(evKey(ev))}" aria-expanded="${open}" aria-label="${open ? 'Show less' : 'Show more details'}">${open ? '⌃' : '⌄'}${!open && docCount(ev.item.id) && isMain ? '<small>📎</small>' : ''}</button>` : ''}
+    ${goBox}${liveBox}</li>`;
 }
 
 function legRow(leg, i) {
@@ -400,6 +440,7 @@ function renderToday(arg) {
     ${banner}
     ${next}
     ${ctx.length ? `<div class="ctx">${ctx.map((c) => `<span>${c}</span>`).join('')}</div>` : ''}
+    ${ag.events.length ? tilesToggle({ refresh: true }) : ''}
     ${ag.events.length || legs.length ? `<ol class="timeline">${rows}</ol>` : `<div class="empty"><p>Nothing planned for this day.</p>${canEdit() ? '<button type="button" class="btn" data-add>Add something</button>' : ''}</div>`}
     ${ag.tonight ? `<p class="tonight">🌙 Tonight: <strong>${esc(ag.tonight.title)}</strong>${ag.tonight.place?.name ? ` · ${esc(shortName(ag.tonight.place))}` : ''}</p>` : ''}
     <p class="hint muted">Drive times are estimates without live traffic, plus ${bufferPct()}% buffer (change in Trip).</p>
@@ -490,6 +531,61 @@ function refreshLive(kind, itemId) {
   const ev = eventsForItem(it, bufferPct()).find((e) => (kind === 'flight' ? e.kind === 'depart' : e.kind === 'drive'));
   if (ev) el.outerHTML = liveHtml(ev);
 }
+
+// ---------- refresh (pull down on Today, or ↻ Refresh) ----------
+
+let refreshing = false;
+const ptr = document.createElement('div');
+ptr.className = 'ptr';
+ptr.setAttribute('role', 'status');
+ptr.setAttribute('aria-live', 'polite');
+document.body.append(ptr);
+
+/** Re-check what can change: live statuses already checked for this day, times, and app updates. */
+async function refreshToday() {
+  if (refreshing || !S.trip) return;
+  refreshing = true;
+  ptr.textContent = '↻ Refreshing…';
+  ptr.className = 'ptr show busy';
+  navigator.serviceWorker?.getRegistration?.().then((r) => r?.update()).catch(() => {});
+  const tasks = [];
+  if (aiOn()) {
+    for (const ev of dayAgenda(S.items, S.viewDay || localDate(), bufferPct()).events) {
+      const kind = ev.item.type === 'flight' && ev.kind === 'depart' ? 'flight' : ev.item.type === 'drive' ? 'road' : '';
+      if (kind && liveGet(liveKey(kind, ev.item))) tasks.push(checkLive(kind, ev.item.id));
+    }
+  }
+  render({ fromData: true });
+  await Promise.allSettled(tasks);
+  refreshing = false;
+  ptr.className = 'ptr';
+  render({ fromData: true });
+  toast(tasks.length ? `Updated · ${tasks.length} live check${tasks.length === 1 ? '' : 's'} refreshed` : 'Up to date');
+}
+
+// Pull down from the top of Today to refresh (iPhone home-screen apps have no built-in pull-to-refresh).
+const PULL = 70;
+let pull = null;
+window.addEventListener('touchstart', (e) => {
+  if (refreshing || sheet.open || (parseRoute().name || 'today') !== 'today' || window.scrollY > 0 || e.touches.length !== 1) { pull = null; return; }
+  pull = { y0: e.touches[0].clientY, x0: e.touches[0].clientX, dy: 0 };
+}, { passive: true });
+window.addEventListener('touchmove', (e) => {
+  if (!pull) return;
+  const dy = e.touches[0].clientY - pull.y0;
+  const dx = e.touches[0].clientX - pull.x0;
+  if (dy <= 0 || Math.abs(dx) > Math.abs(dy) || window.scrollY > 0) { pull.dy = 0; ptr.className = 'ptr'; return; }
+  pull.dy = dy;
+  ptr.style.setProperty('--pull', `${Math.min(dy, PULL * 1.6)}px`);
+  ptr.textContent = dy >= PULL ? '↑ Release to refresh' : '↓ Pull to refresh';
+  ptr.className = `ptr show pulling${dy >= PULL ? ' ready' : ''}`;
+}, { passive: true });
+window.addEventListener('touchend', () => {
+  if (!pull) return;
+  const go = pull.dy >= PULL;
+  pull = null;
+  if (go) refreshToday(); else ptr.className = 'ptr';
+});
 
 async function checkLive(kind, itemId) {
   const it = S.items.find((i) => i.id === itemId);
@@ -667,6 +763,7 @@ function renderPlan() {
     <p class="muted">${esc(fmtDate(span.start, { long: true }))} – ${esc(fmtDate(span.end, { long: true }))} · ${days.length} day${days.length === 1 ? '' : 's'}</p>
     <div class="ctx">${Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `<span>${TYPES[k].icon} ${n} ${esc(n === 1 ? TYPES[k].label.toLowerCase() : TYPES[k].plural)}</span>`).join('')}</div>
     ${ideasCard()}
+    ${tilesToggle()}
     ${days.map((d, i) => {
       const ag = dayAgenda(S.items, d, bufferPct());
       return `<section class="plan-day ${d === today ? 'is-today' : ''}">
@@ -1167,6 +1264,23 @@ main.addEventListener('click', (e) => {
   const edit = e.target.closest('[data-edit]');
   if (edit) { const it = S.items.find((i) => i.id === edit.dataset.edit); if (it) openItemForm(it.type, it); return; }
   if (e.target.closest('[data-add]')) { openAddChooser(); return; }
+  const ex = e.target.closest('[data-expand]');
+  if (ex) {
+    const k = ex.dataset.expand;
+    if (flipped.has(k)) flipped.delete(k); else flipped.add(k);
+    saveFlipped();
+    render({ fromData: true });
+    return;
+  }
+  if (e.target.closest('[data-refresh]')) { refreshToday(); return; }
+  const tm = e.target.closest('[data-tiles]');
+  if (tm) {
+    S.settings = store.setSettings({ tiles: tm.dataset.tiles });
+    flipped.clear();
+    saveFlipped();
+    render({ fromData: true });
+    return;
+  }
   const lc = e.target.closest('[data-live-check]');
   if (lc) { checkLive(lc.dataset.liveCheck, lc.dataset.item); return; }
   if (e.target.closest('[data-brief]')) { runBrief(S.viewDay); return; }

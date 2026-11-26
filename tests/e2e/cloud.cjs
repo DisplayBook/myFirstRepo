@@ -90,6 +90,8 @@ async function main() {
       await route.fulfill({ status: res.status, headers: Object.fromEntries(res.headers), body: Buffer.from(await res.arrayBuffer()) });
     });
     await context.route(/nominatim|project-osrm|tile\.openstreetmap/, (route) => route.fulfill({ json: [] }));
+    // Most checks read tile details, so start phones with tiles expanded (compact is tested separately).
+    await context.addInitScript(() => { if (!localStorage.getItem('tp:settings')) localStorage.setItem('tp:settings', JSON.stringify({ tiles: 'full' })); });
     const page = await context.newPage();
     page.on('pageerror', (e) => errors.push(`${name}: ${e.message}`));
     page.on('console', (m) => {
