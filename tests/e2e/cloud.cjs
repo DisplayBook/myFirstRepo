@@ -32,7 +32,7 @@ const proxyEnv = { ANTHROPIC_API_KEY: 'sk-ant-server-key', ALLOWED_ORIGIN: `http
 let proxyHandler;
 async function getProxy() {
   if (proxyHandler) return proxyHandler;
-  const { makeHandler } = await import('../../workers/trip-ai/worker.js');
+  const { makeHandler } = (await import('../../workers/trip-ai/worker.js')).default._test;
   proxyHandler = makeHandler({
     firestoreBase: 'http://127.0.0.1:8085/v1',
     verifyToken: async (token, project) => {
