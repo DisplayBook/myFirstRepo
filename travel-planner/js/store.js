@@ -108,6 +108,18 @@ const local = {
     if (!blob) throw new Error('This document is missing from this device');
     return blob;
   },
+  async addIdea(id, idea) {
+    const d = readJSON(tripKey(id), { meta: {}, items: {} });
+    d.meta = { ...d.meta, ideas: [...(d.meta.ideas || []).filter((i) => i.id !== idea.id), idea] };
+    if (!writeJSON(tripKey(id), d)) throw new Error('Could not save: device storage is full');
+    emitLocal(id);
+  },
+  async removeIdea(id, idea) {
+    const d = readJSON(tripKey(id), { meta: {}, items: {} });
+    d.meta = { ...d.meta, ideas: (d.meta.ideas || []).filter((i) => i.id !== idea.id) };
+    writeJSON(tripKey(id), d);
+    emitLocal(id);
+  },
   async updateFile(id, meta) {
     const d = readJSON(tripKey(id), { meta: {}, items: {} });
     if (!d.files?.[meta.id]) return;
@@ -277,6 +289,16 @@ const cloud = {
     const writes = chunks.map((c, i) => fs.setDoc(fs.doc(db, 'trips', id, 'files', meta.id, 'chunks', String(i)), { i, b: fs.Bytes.fromUint8Array(c) }));
     writes.push(fs.setDoc(fs.doc(db, 'trips', id, 'files', meta.id), { ...meta, chunks: chunks.length }));
     await Promise.all(writes);
+  },
+  // Ideas live in the trip document; arrayUnion/arrayRemove keep two people
+  // saving at the same time from overwriting each other.
+  async addIdea(id, idea) {
+    const { fs, db } = await loadCloud();
+    await fs.setDoc(fs.doc(db, 'trips', id), { ideas: fs.arrayUnion(idea) }, { merge: true });
+  },
+  async removeIdea(id, idea) {
+    const { fs, db } = await loadCloud();
+    await fs.setDoc(fs.doc(db, 'trips', id), { ideas: fs.arrayRemove(idea) }, { merge: true });
   },
   async updateFile(id, meta) {
     const { fs, db } = await loadCloud();

@@ -349,14 +349,26 @@ async function main() {
         if (body.stream) {
           // Trip chat: stream the answer as server-sent events, like the real API.
           const n = calls.filter((c) => c.body.stream).length;
-          const answer = n === 1 ? 'Your hotel booking reference is **HP-778**.\n\n- Check-in from 15:00' : 'It should be sunny.';
           const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+          const answer = n === 1 ? 'Your hotel booking reference is **HP-778**.\n\n- Check-in from 15:00'
+            : n === 2 ? 'It should be sunny.' : 'Two good options near your hotel:\n\n- **Katz\'s Delicatessen** for lunch\n- **Top of the Rock** at sunset';
+          // The third answer recommends places and reports them through report_places.
+          const placesJson = JSON.stringify({ places: [
+            { name: 'Katz\'s Delicatessen', category: 'restaurant', why: 'Famous pastrami sandwiches.', when: 'Lunch', address: '205 E Houston St, New York' },
+            { name: 'Top of the Rock', category: 'attraction', why: 'Best skyline views at sunset.', when: 'Sunset', address: '30 Rockefeller Plaza, New York' },
+          ] });
+          const toolBlock = n === 3
+            ? ev('content_block_start', { index: 1, content_block: { type: 'tool_use', id: 'toolu_places', name: 'report_places', input: {} } })
+              + placesJson.match(/.{1,40}/gs).map((t) => ev('content_block_delta', { index: 1, delta: { type: 'input_json_delta', partial_json: t } })).join('')
+              + ev('content_block_stop', { index: 1 })
+            : '';
           const sse = ev('message_start', { message: { id: `msg_${n}`, type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } })
             + ev('content_block_start', { index: 0, content_block: { type: 'text', text: '', citations: [] } })
             + answer.match(/.{1,12}/gs).map((t) => ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: t } })).join('')
             + (n === 2 ? ev('content_block_delta', { index: 0, delta: { type: 'citations_delta', citation: { type: 'web_search_result_location', url: 'https://weather.example/nyc', title: 'NYC weather', cited_text: 'sunny', encrypted_index: 'x' } } }) : '')
             + ev('content_block_stop', { index: 0 })
-            + ev('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 20 } })
+            + toolBlock
+            + ev('message_delta', { delta: { stop_reason: n === 3 ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: { output_tokens: 20 } })
             + ev('message_stop', {});
           await route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'text/event-stream', 'request-id': 'req_chat' }, body: sse });
           return;
@@ -537,6 +549,59 @@ async function main() {
       assert.equal(await page.locator('.msg').count(), 0);
       await page.locator('#chat-starters .chip').first().waitFor();
       await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
+    });
+
+    await check('chat: place cards → save to Ideas or add to the plan; Ideas list on Plan', async () => {
+      await page.goto(`${BASE}#/today/2026-12-03`);
+      await page.getByRole('button', { name: 'Ask about this trip' }).click();
+      await page.getByLabel('Your question').fill('Where should we go today?');
+      await page.getByLabel('Your question').press('Enter');
+      const cards = page.locator('.place-card');
+      await cards.filter({ hasText: 'Top of the Rock' }).waitFor();
+      assert.equal(await cards.count(), 2);
+      const req = calls.filter((c) => c.body.stream).at(-1).body;
+      const tool = req.tools.find((t) => t.name === 'report_places');
+      assert.ok(tool && tool.strict && tool.eager_input_streaming, 'places tool is offered');
+      // Layout: the conversation ends above the input box, never behind it.
+      const logBox = await page.locator('#chat-log').boundingBox();
+      const formBox = await page.locator('#chat-form').boundingBox();
+      assert.ok(logBox.y + logBox.height <= formBox.y + 1, `log bottom ${logBox.y + logBox.height} > input top ${formBox.y}`);
+      await shot(page, '15-chat-places');
+      // Save one as an idea.
+      await cards.filter({ hasText: 'Katz' }).getByRole('button', { name: /Save idea/ }).click();
+      await cards.filter({ hasText: 'Katz' }).getByText('✓ In Ideas').waitFor();
+      // Add the other straight to the plan, then return to the chat.
+      await cards.filter({ hasText: 'Top of the Rock' }).getByRole('button', { name: /Add to plan/ }).click();
+      await page.locator('#item-form').waitFor();
+      assert.equal(await page.getByLabel('What').inputValue(), 'Top of the Rock');
+      assert.equal(await page.getByLabel('Starts').inputValue(), '2026-12-03T18:00');
+      await page.locator('#save-item').click();
+      await page.getByRole('heading', { name: '💬 Ask about this trip' }).waitFor();
+      await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
+      await page.goto(`${BASE}#/today/2026-12-03`);
+      await page.locator('.ev', { hasText: 'Best skyline views at sunset.' }).getByText('18:00').waitFor();
+
+      // Ideas on the Plan tab: add one to the plan (it leaves Ideas).
+      await page.goto(`${BASE}#/plan`);
+      const ideas = page.locator('#ideas');
+      await ideas.getByText('Katz\'s Delicatessen').waitFor();
+      await shot(page, '16-ideas');
+      await ideas.getByRole('button', { name: /Add to plan/ }).click();
+      await page.locator('#item-form').waitFor();
+      await page.getByLabel('Starts').fill('2026-12-04T12:30');
+      await page.locator('#save-item').click();
+      await page.getByText('Added to the plan and removed from Ideas').waitFor();
+      await ideas.getByText(/Save restaurants, activities/).waitFor();
+
+      // Save from the day summary, then remove it.
+      await page.goto(`${BASE}#/today/2026-12-02`);
+      await page.locator('.brief-ideas li', { hasText: 'Bryant Park' }).getByRole('button', { name: /Save idea/ }).click();
+      await page.locator('.brief-ideas li', { hasText: 'Bryant Park' }).getByText('✓ In Ideas').waitFor();
+      await page.goto(`${BASE}#/plan`);
+      await ideas.getByText('Bryant Park Winter Village').waitFor();
+      page.once('dialog', (d) => d.accept());
+      await ideas.getByRole('button', { name: 'Remove' }).click();
+      await ideas.getByText(/Save restaurants, activities/).waitFor();
     });
 
     await check('layout fits a phone screen (no sideways scroll)', async () => {

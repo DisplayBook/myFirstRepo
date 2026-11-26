@@ -12,7 +12,7 @@ import { showMap, destroyMap } from './map.js';
 import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount, payment } from './budget.js';
 import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime, askTrip } from './ai.js';
-import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText } from './chat.js';
+import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea } from './chat.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -521,7 +521,8 @@ function briefHtml(day) {
       <span class="idea-body"><strong>${esc(x.name)}</strong>${x.when ? ` <span class="muted small">· ${esc(x.when)}</span>` : ''}
         <span class="small">${esc(x.why)}</span>
         <span class="idea-actions"><a class="small" href="${esc(mapUrl(`${x.name}, ${x.address}`))}" target="_blank" rel="noopener">Map</a>
-        ${canEdit() ? `<button type="button" class="link small" data-idea="${i}">＋ Add to plan</button>` : ''}</span></span></li>`).join('')}</ul>` : ''}
+        ${canEdit() ? `${isSavedIdea(ideasList(), x.name) ? '<span class="small saved">✓ In Ideas</span>' : `<button type="button" class="link small" data-idea-save="${i}">☆ Save idea</button>`}
+        <button type="button" class="link small" data-idea="${i}">＋ Add to plan</button>` : ''}</span></span></li>`).join('')}</ul>` : ''}
     ${err ? `<p class="error small">${esc(err)}</p>` : ''}
     <p class="muted small">AI suggestions: check opening times before you go. Updated ${esc(ago(cached.at))} · <button type="button" class="link small" data-brief>Refresh</button></p>`;
 }
@@ -563,18 +564,59 @@ async function runBrief(day) {
   }
 }
 
-async function addIdea(day, i) {
+function addIdea(day, i) {
   const x = liveGet(briefKey(day))?.data?.suggestions?.[i];
-  if (!x) return;
+  if (x) placeToPlan(x, { day });
+}
+
+// ---------- ideas (places to maybe do) ----------
+
+const PLACE_ICON = { attraction: '🏛️', restaurant: '🍽️', cafe: '☕', bar: '🍸', shopping: '🛍️', event: '🎟️', outdoors: '🌳', other: '📍' };
+const mapSearchUrl = (q) => (isApple ? `https://maps.apple.com/?q=${encodeURIComponent(q)}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`);
+const ideasList = () => (Array.isArray(S.meta.ideas) ? S.meta.ideas : []);
+
+/** Save a suggested place to the trip's shared Ideas list. */
+async function saveIdea(p, source) {
+  if (isSavedIdea(ideasList(), p.name)) { toast('Already in Ideas'); return false; }
+  const idea = cleanItem({
+    id: uid(12), name: p.name, category: p.category, why: p.why, when: p.when, address: p.address,
+    source, addedBy: S.settings.name, addedAt: new Date().toISOString(),
+  });
+  try { await write((b, id) => b.addIdea(id, idea)); } catch { return false; }
+  toast('Saved to Ideas (top of the Plan tab)');
+  return true;
+}
+
+/** Open a new activity pre-filled from a suggested place (found on the map if possible). */
+async function placeToPlan(x, { day, onSaved } = {}) {
   toast('Finding it on the map…');
-  let place = { name: x.address ? `${x.name}, ${x.address}` : x.name };
+  const label = x.address ? `${x.name}, ${x.address}` : x.name;
+  let place = { name: label.slice(0, 200) };
   try {
-    const [hit] = await searchPlaces(x.address ? `${x.name}, ${x.address}` : x.name);
+    const [hit] = await searchPlaces(label);
     const hit2 = hit || (x.address ? (await searchPlaces(x.address))[0] : null);
     if (hit2) place = { name: `${x.name}, ${x.address || hit2.name}`.slice(0, 200), lat: hit2.lat, lon: hit2.lon };
   } catch { /* keep the name only */ }
-  const start = `${day}T${guessTime(x.when)}`;
-  openItemForm('activity', null, { title: x.name, place, start, notes: x.why });
+  const d = day || S.viewDay || defaultDay(tripSpan(S.meta, S.items), localDate());
+  openItemForm('activity', null, { title: x.name, place, start: `${d}T${guessTime(x.when)}`, notes: x.why }, { onSaved });
+}
+
+function ideasCard() {
+  const ideas = ideasList();
+  if (!ideas.length && !canEdit()) return '';
+  return `<section class="card ideas-card" id="ideas">
+    <h2><span>💡 Ideas${ideas.length ? ` <span class="muted small">${ideas.length}</span>` : ''}</span></h2>
+    ${ideas.length ? `<ul class="ideas-list">${ideas.map((x) => `<li>
+      <span class="idea-icon" aria-hidden="true">${PLACE_ICON[x.category] || '📍'}</span>
+      <span class="idea-body"><strong>${esc(x.name)}</strong>${x.when ? ` <span class="muted small">· ${esc(x.when)}</span>` : ''}
+        ${x.why ? `<span class="small">${esc(x.why)}</span>` : ''}
+        ${x.address ? `<span class="muted small">${esc(x.address)}</span>` : ''}
+        ${x.addedBy ? `<span class="muted small">Saved by ${esc(x.addedBy)}</span>` : ''}
+        <span class="idea-actions"><a class="small" href="${esc(mapSearchUrl(x.address ? `${x.name}, ${x.address}` : x.name))}" target="_blank" rel="noopener">Map</a>
+        ${canEdit() ? `<button type="button" class="link small" data-idea-plan="${esc(x.id)}">＋ Add to plan</button>
+        <button type="button" class="link small danger-link" data-idea-remove="${esc(x.id)}">Remove</button>` : ''}</span></span></li>`).join('')}</ul>`
+      : '<p class="muted small">Save restaurants, activities and places you might do from the 💬 chat or the day summary on Today. Everyone on the trip sees them here.</p>'}
+  </section>`;
 }
 
 // ---------- Plan (whole itinerary) ----------
@@ -586,13 +628,14 @@ function renderPlan() {
   const today = localDate();
   if (!S.items.length) {
     main.innerHTML = `<h1>Plan</h1><div class="empty"><p>No plans yet. Add flights, hotels, car hire, drives and activities.</p>
-      ${canEdit() ? '<button type="button" class="btn" data-add>Add the first item</button>' : ''}</div>`;
+      ${canEdit() ? '<button type="button" class="btn" data-add>Add the first item</button>' : ''}</div>${ideasCard()}`;
     return;
   }
   const counts = Object.fromEntries(Object.keys(TYPES).map((k) => [k, S.items.filter((i) => i.type === k).length]));
   main.innerHTML = `<h1>Plan</h1>
     <p class="muted">${esc(fmtDate(span.start, { long: true }))} – ${esc(fmtDate(span.end, { long: true }))} · ${days.length} day${days.length === 1 ? '' : 's'}</p>
     <div class="ctx">${Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `<span>${TYPES[k].icon} ${n} ${esc(n === 1 ? TYPES[k].label.toLowerCase() : TYPES[k].plural)}</span>`).join('')}</div>
+    ${ideasCard()}
     ${days.map((d, i) => {
       const ag = dayAgenda(S.items, d, bufferPct());
       return `<section class="plan-day ${d === today ? 'is-today' : ''}">
@@ -1096,12 +1139,38 @@ main.addEventListener('click', (e) => {
   if (lc) { checkLive(lc.dataset.liveCheck, lc.dataset.item); return; }
   if (e.target.closest('[data-brief]')) { runBrief(S.viewDay); return; }
   const idea = e.target.closest('[data-idea]');
-  if (idea) addIdea(S.viewDay, Number(idea.dataset.idea));
+  if (idea) { addIdea(S.viewDay, Number(idea.dataset.idea)); return; }
+  const ideaSave = e.target.closest('[data-idea-save]');
+  if (ideaSave) {
+    const x = liveGet(briefKey(S.viewDay))?.data?.suggestions?.[Number(ideaSave.dataset.ideaSave)];
+    if (x) saveIdea(x, 'summary');
+    return;
+  }
+  const ideaPlan = e.target.closest('[data-idea-plan]');
+  if (ideaPlan) {
+    const x = ideasList().find((i) => i.id === ideaPlan.dataset.ideaPlan);
+    if (x) {
+      placeToPlan(x, {
+        onSaved: () => {
+          closeSheet();
+          write((b, id) => b.removeIdea(id, x)).catch(() => {});
+          toast('Added to the plan and removed from Ideas');
+        },
+      });
+    }
+    return;
+  }
+  const ideaRemove = e.target.closest('[data-idea-remove]');
+  if (ideaRemove) {
+    const x = ideasList().find((i) => i.id === ideaRemove.dataset.ideaRemove);
+    if (x && confirm(`Remove "${x.name}" from Ideas?`)) write((b, id) => b.removeIdea(id, x)).catch(() => {});
+  }
 });
 
 // ---------- sheet (dialog) ----------
 
 function openSheet(html, label) {
+  sheetBody.className = '';
   sheetBody.innerHTML = html;
   sheet.setAttribute('aria-label', label);
   if (!sheet.open) sheet.showModal();
@@ -1600,9 +1669,17 @@ function liveNotes() {
   return notes;
 }
 
-function chatBubble(m) {
+function chatBubble(m, mi) {
   if (m.role === 'user') return `<li class="msg me"><div class="bubble">${esc(m.text)}</div></li>`;
+  const places = (m.places || []).length ? `<div class="places">${m.places.map((p, pi) => `<div class="place-card">
+      <span class="idea-icon" aria-hidden="true">${PLACE_ICON[p.category] || '📍'}</span>
+      <span class="idea-body"><strong>${esc(p.name)}</strong>${p.when ? ` <span class="muted small">· ${esc(p.when)}</span>` : ''}
+        ${p.why ? `<span class="small">${esc(p.why)}</span>` : ''}
+        <span class="idea-actions"><a class="small" href="${esc(mapSearchUrl(p.address ? `${p.name}, ${p.address}` : p.name))}" target="_blank" rel="noopener">Map</a>
+        ${canEdit() ? `${isSavedIdea(ideasList(), p.name) ? '<span class="small saved">✓ In Ideas</span>' : `<button type="button" class="link small" data-chat-save="${mi}:${pi}">☆ Save idea</button>`}
+        <button type="button" class="link small" data-chat-plan="${mi}:${pi}">＋ Add to plan</button>` : ''}</span></span></div>`).join('')}</div>` : '';
   return `<li class="msg bot"><div class="bubble">${m.error ? `<p class="error">${esc(m.text)}</p>` : renderMarkdown(m.text)}
+    ${places}
     ${(m.sources || []).length ? `<div class="sources"><span class="muted small">Sources:</span> ${m.sources.map((x) => `<a class="small" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>`).join(' · ')}</div>` : ''}</div></li>`;
 }
 
@@ -1627,16 +1704,32 @@ function openChat() {
     </form>
     <p class="muted small chat-note">Answers use your trip details and the web, and can be wrong. Check anything important.</p>
   </div>`, 'Ask about this trip');
+  sheetBody.classList.add('chat-mode');
   const log = $('#chat-log');
   const q = $('#chat-q');
   const draw = () => {
     const msgs = chatLoad();
-    log.innerHTML = msgs.map(chatBubble).join('');
+    log.innerHTML = msgs.map((m, i) => chatBubble(m, i)).join('');
     $('#chat-starters').innerHTML = msgs.length ? '' : CHAT_STARTERS.map((t) => `<button type="button" class="chip" data-q="${esc(t)}">${esc(t)}</button>`).join('');
     log.scrollTop = log.scrollHeight;
   };
   draw();
   $('#chat-new').onclick = () => { chatAbort?.abort(); chatSave([]); draw(); q.focus(); };
+  // Place cards: save to Ideas, or add to the plan (then come back to the chat).
+  log.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-chat-save], [data-chat-plan]');
+    if (!b) return;
+    const [mi, pi] = (b.dataset.chatSave || b.dataset.chatPlan).split(':').map(Number);
+    const p = chatLoad()[mi]?.places?.[pi];
+    if (!p) return;
+    if (b.dataset.chatSave) {
+      b.disabled = true;
+      if (await saveIdea(p, 'chat')) b.outerHTML = '<span class="small saved">✓ In Ideas</span>';
+      else b.disabled = false;
+    } else {
+      placeToPlan(p, { onSaved: () => { toast(`${p.name} added to the plan`); openChat(); } });
+    }
+  });
   $('#chat-starters').onclick = (e) => { const b = e.target.closest('[data-q]'); if (b) send(b.dataset.q); };
   q.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#chat-form').requestSubmit(); } });
   q.addEventListener('input', () => { q.style.height = 'auto'; q.style.height = `${Math.min(q.scrollHeight, 140)}px`; });
@@ -1668,7 +1761,11 @@ function openChat() {
         onText: (t) => { if (li.isConnected) { $('.bubble', li).innerHTML = renderMarkdown(t); log.scrollTop = log.scrollHeight; } },
       });
       if (S.trip?.id !== tripId) return;
-      chatSave([...msgs, { role: 'assistant', text: answerText(content) || 'Sorry, I don\'t have an answer for that.', sources: sourcesFrom(content), at: Date.now() }]);
+      const places = placesFrom(content);
+      chatSave([...msgs, {
+        role: 'assistant', text: answerText(content) || (places.length ? 'Here are some ideas:' : 'Sorry, I don\'t have an answer for that.'),
+        sources: sourcesFrom(content), places, at: Date.now(),
+      }]);
     } catch (err) {
       if (err?.name === 'AbortError' || chatAbort?.signal.aborted) return;
       if (S.trip?.id === tripId) chatSave([...msgs, { role: 'assistant', text: friendlyError(err), error: true, at: Date.now() }]);

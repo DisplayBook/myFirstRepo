@@ -300,14 +300,18 @@ fieldset.plain:disabled .place-quick, fieldset.plain:disabled .place-chosen .lin
 .brief-ideas li { display: flex; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
 .idea-icon { font-size: 1.3rem; }
 .idea-body { display: grid; gap: 2px; min-width: 0; }
-.idea-actions { display: flex; gap: 14px; align-items: center; }
+.idea-actions { display: flex; flex-wrap: wrap; gap: 2px 16px; align-items: center; }
+.idea-actions > * { flex: none; white-space: nowrap; }
+.msg.bot .bubble:has(.places) { max-width: 100%; width: 100%; }
 .idea-actions .link { padding: 4px 0; min-height: 32px; }
 
 /* ---------- trip chat ---------- */
 .topbar-right { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .chat-btn { width: 40px; height: 40px; font-size: 1.15rem; }
-.chat { display: flex; flex-direction: column; min-height: min(78dvh, 720px); }
-.chat-log { list-style: none; margin: 0; padding: 4px 0; display: grid; gap: 10px; align-content: start; flex: 1; overflow-y: auto; }
+.chat { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+/* The chat is a fixed-height panel: only the conversation scrolls, above the input. */
+#sheet-body.chat-mode { display: flex; flex-direction: column; height: min(88dvh, 860px); overflow: hidden; padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+.chat-log { list-style: none; margin: 0; padding: 4px 2px 8px; display: flex; flex-direction: column; gap: 10px; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .msg { display: flex; }
 .msg.me { justify-content: flex-end; }
 .bubble { max-width: 88%; padding: 10px 14px; border-radius: 16px; background: var(--bg); border: 1px solid var(--line); overflow-wrap: anywhere; }
@@ -322,9 +326,20 @@ fieldset.plain:disabled .place-quick, fieldset.plain:disabled .place-chosen .lin
 @keyframes pulse { 50% { opacity: .4; } }
 .chat-starters { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0; }
 .chat-starters .chip { white-space: normal; text-align: left; min-height: 36px; padding: 6px 12px; }
-.chat-input { display: flex; gap: 8px; align-items: flex-end; position: sticky; bottom: 0; background: var(--card); padding: 8px 0 2px; }
+.chat-input { display: flex; gap: 8px; align-items: flex-end; flex: none; background: var(--card); padding: 8px 0 2px; border-top: 1px solid var(--line); }
+.chat .sheet-head, .chat-starters, .chat-note { flex: none; }
 .chat-input textarea { flex: 1; resize: none; min-height: 44px; max-height: 140px; }
 .chat-note { margin: 2px 0 0; }
+
+/* ---------- place cards (chat) & ideas ---------- */
+.places { display: grid; gap: 8px; margin-top: 8px; }
+.place-card { display: flex; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.place-card .idea-body { flex: 1; }
+.idea-actions .saved { color: var(--ok); font-weight: 600; }
+.ideas-card h2 { display: flex; justify-content: space-between; align-items: center; }
+.ideas-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.danger-link { color: var(--bad) !important; }
+.ideas-list li { display: flex; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
 
 /* ---------- plan ---------- */
 .plan-day { margin: 18px 0; }

@@ -44,11 +44,18 @@ async function getProxy() {
       if (!String(url).startsWith('https://api.anthropic.com/')) return fetch(url, init);
       upstreamCalls.push({ url: String(url), headers: init.headers, body: JSON.parse(init.body) });
       const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+      const lastQ = JSON.stringify(JSON.parse(init.body).messages.at(-1));
+      const places = /ideas/i.test(lastQ)
+        ? ev('content_block_start', { index: 1, content_block: { type: 'tool_use', id: 'toolu_p', name: 'report_places', input: {} } })
+          + ev('content_block_delta', { index: 1, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ places: [{ name: 'Gelateria del Teatro', category: 'cafe', why: 'Excellent gelato.', when: 'Afternoon', address: 'Via dei Coronari 65, Rome' }] }) } })
+          + ev('content_block_stop', { index: 1 })
+        : '';
       const sse = ev('message_start', { message: { id: 'msg_p', type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } } })
         + ev('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })
         + ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'The Colosseum tour is at **10:00** on Wed 2 Dec.' } })
         + ev('content_block_stop', { index: 0 })
-        + ev('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } })
+        + places
+        + ev('message_delta', { delta: { stop_reason: places ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } })
         + ev('message_stop', {});
       return new Response(sse, { headers: { 'content-type': 'text/event-stream', 'request-id': 'req_p' } });
     },
@@ -229,6 +236,27 @@ async function main() {
       assert.equal(upstreamCalls.length, 3);
       await viewer.shot('03-shared-ai');
       await viewer.locator('#sheet').getByRole('button', { name: 'Close' }).click();
+    });
+
+    await check('ideas saved from the chat are shared live; viewers can\'t change them', async () => {
+      await alice.goto(`${BASE}#/plan`);
+      await alice.getByRole('button', { name: 'Ask about this trip' }).click();
+      await alice.getByLabel('Your question').fill('Any ideas for gelato?');
+      await alice.getByLabel('Your question').press('Enter');
+      const card = alice.locator('.place-card', { hasText: 'Gelateria del Teatro' });
+      await card.getByRole('button', { name: /Save idea/ }).click();
+      await card.getByText('✓ In Ideas').waitFor({ timeout: 15000 });
+      await alice.locator('#sheet').getByRole('button', { name: 'Close' }).click();
+      // Appears on the viewer's Plan, without edit buttons.
+      await viewer.goto(`${BASE}#/plan`);
+      await viewer.locator('#ideas').getByText('Gelateria del Teatro').waitFor({ timeout: 15000 });
+      assert.equal(await viewer.locator('#ideas').getByRole('button', { name: 'Remove' }).count(), 0);
+      // The admin removes it; it disappears for the viewer too.
+      await alice.locator('#ideas').getByText('Gelateria del Teatro').waitFor();
+      alice.once('dialog', (d) => d.accept());
+      await alice.locator('#ideas').getByRole('button', { name: 'Remove' }).click();
+      await alice.locator('#ideas').getByText('Gelateria del Teatro').waitFor({ state: 'detached', timeout: 15000 });
+      await viewer.locator('#ideas').waitFor({ state: 'detached', timeout: 15000 });
     });
 
     await check('viewer can remove the trip from their phone only', async () => {

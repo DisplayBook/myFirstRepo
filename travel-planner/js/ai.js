@@ -443,6 +443,27 @@ export function guessTime(when = '') {
 
 // ---------- trip chat ----------
 
+/** The chat lists the places it recommends through this tool, so the app can offer Save / Add to plan. */
+export const PLACES_TOOL = {
+  name: 'report_places',
+  description: 'After answering, list the specific places or activities you recommended (restaurants, cafes, attractions, tours, events) so the app can show Save and Add-to-plan buttons. Call it at most once, only when you recommended specific places.',
+  strict: true,
+  // The answer streams; let the tool input stream too. The app validates it (see chat.js placesFrom).
+  eager_input_streaming: true,
+  input_schema: obj({
+    places: {
+      type: 'array',
+      items: obj({
+        name: str('Name of the place or activity'),
+        category: { type: 'string', enum: ['attraction', 'restaurant', 'cafe', 'bar', 'shopping', 'event', 'outdoors', 'other'] },
+        why: str('One short sentence on why it fits'),
+        when: str('Suggested day/time, e.g. "Thu lunch", "After 16:00", or empty'),
+        address: str('Street address or area and city, good enough to find on a map'),
+      }),
+    },
+  }),
+};
+
 /**
  * Ask a question about the trip. `history` is [{role, text}] of earlier turns;
  * `context` is the trip as text. Streams the answer through onText(fullTextSoFar).
@@ -468,7 +489,8 @@ export async function askTrip(apiKey, { system, context, history, question, onTe
         { type: 'text', text: system },
         { type: 'text', text: `# Trip data\n\n${context}`, cache_control: { type: 'ephemeral' } },
       ],
-      tools: [{ ...WEB_SEARCH, max_uses: 3 }],
+      tools: [{ ...WEB_SEARCH, max_uses: 3 }, PLACES_TOOL],
+      tool_choice: { type: 'auto' },
       messages,
     }, { signal });
     stream.on('text', (delta) => { soFar += delta; onText?.(soFar); });
