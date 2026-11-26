@@ -70,6 +70,8 @@ async function main() {
     });
     await context.route('https://tile.openstreetmap.org/**', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
 
+    // Most checks read tile details, so start phones with tiles expanded (compact is tested separately).
+    await context.addInitScript(() => { if (!localStorage.getItem('tp:settings')) localStorage.setItem('tp:settings', JSON.stringify({ tiles: 'full' })); });
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
@@ -722,6 +724,42 @@ async function main() {
       await shot(page, '19-directions');
       await page.goto(`${BASE}#/trip`);
       await page.getByLabel('Directions open in').selectOption('google');
+    });
+
+    await check('compact tiles: essentials only, ⌄ expands one, Expand all / Collapse all', async () => {
+      await page.goto(`${BASE}#/today/2026-12-01`);
+      await page.getByRole('button', { name: '⌃ Collapse all' }).click();
+      const fl = page.locator('.ev', { hasText: 'Fly Heathrow Airport' });
+      await fl.locator('.ev-chip', { hasText: 'Delayed 45 min' }).waitFor();
+      assert.equal(await fl.locator('.ev-meta').count(), 1, 'one key line');
+      assert.equal(await fl.locator('.ev-go').count(), 0, 'directions hidden');
+      assert.equal(await fl.locator('.live').count(), 0, 'live box hidden');
+      await shot(page, '20-compact');
+      await fl.getByRole('button', { name: 'Show more details' }).click();
+      await fl.locator('.live').getByText('Terminal 5 · Gate B32').waitFor();
+      await fl.locator('.ev-go').getByText('Directions to Heathrow Airport').waitFor();
+      await page.reload();
+      await page.locator('.ev', { hasText: 'Fly Heathrow Airport' }).locator('.live').waitFor(); // remembered
+      await page.getByRole('button', { name: '⌄ Expand all' }).click();
+      await page.locator('.ev', { hasText: 'Check in · Hotel Penn' }).locator('.ev-go').waitFor();
+    });
+
+    await check('pull down on Today refreshes live checks', async () => {
+      await page.goto(`${BASE}#/today/2026-12-01`);
+      await page.locator('.ev', { hasText: 'Fly Heathrow Airport' }).waitFor();
+      const before = calls.filter((c) => c.body.tools?.some((t) => t.name === 'report_flight_status')).length;
+      await page.evaluate(async () => {
+        const t = (y) => new Touch({ identifier: 1, target: document.body, clientX: 150, clientY: y });
+        document.body.dispatchEvent(new TouchEvent('touchstart', { touches: [t(120)], bubbles: true }));
+        for (const y of [150, 180, 210, 240]) document.body.dispatchEvent(new TouchEvent('touchmove', { touches: [t(y)], bubbles: true }));
+        document.body.dispatchEvent(new TouchEvent('touchend', { touches: [], bubbles: true }));
+      });
+      await page.getByText(/Updated · 1 live check refreshed/).waitFor();
+      const after = calls.filter((c) => c.body.tools?.some((t) => t.name === 'report_flight_status')).length;
+      assert.equal(after, before + 1, 'flight status was re-checked');
+      // The ↻ Refresh link does the same.
+      await page.getByRole('button', { name: '↻ Refresh' }).click();
+      await page.getByText(/Updated · 1 live check refreshed/).waitFor();
     });
 
     await check('layout fits a phone screen (no sideways scroll)', async () => {
