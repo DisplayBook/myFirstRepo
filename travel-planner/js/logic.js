@@ -451,7 +451,11 @@ export function driveLegs(agenda, { minKm = 0.5, maxKm = 1500 } = {}) {
         });
       }
     }
-    const nextPlace = ev.endPlace && hasCoords(ev.endPlace) ? ev.endPlace : hasCoords(ev.place) ? ev.place : cur?.place;
+    // Where you are afterwards. A named place counts even without map coordinates
+    // (e.g. an airport that couldn't be placed): you're there, so no drive is
+    // worked out from where you were before the flight/train.
+    const named = (p) => p && (hasCoords(p) || p.name);
+    const nextPlace = named(ev.endPlace) ? ev.endPlace : named(ev.place) ? ev.place : cur?.place;
     cur = nextPlace ? { place: nextPlace, at: ev.endAt || ev.at, label: ev.endPlace ? shortName(ev.endPlace) : ev.label } : cur;
   });
   const checkedInToday = events.some((e) => e.kind === 'checkin' && tonight && e.item.id === tonight.id);

@@ -543,3 +543,14 @@ test('flight lookup: a far-ahead date uses the usual schedule on the requested d
   assert.equal(night.end, '2027-08-22T06:10');
   assert.equal(normalizeFlightLookup({ ...usual, basis: 'exact_date', from: { ...usual.from, date: '2027-08-21' }, to: { ...usual.to, date: '2027-08-21' } }, '2027-08-21').usualSchedule, undefined);
 });
+
+test('drive legs: never across a flight, even if the airport has no map position', () => {
+  const lhr = { name: 'London Heathrow (LHR)', lat: 51.47, lon: -0.4543 };
+  const its = [
+    { id: 'h0', type: 'hotel', title: 'Airport hotel', place: lhr, start: '2027-08-20T15:00', end: '2027-08-21T05:00' },
+    { id: 'f', type: 'flight', from: lhr, to: { name: 'Munich (MUC)' }, start: '2027-08-21T07:00', end: '2027-08-21T10:20' },
+    { id: 'c', type: 'car', provider: 'Europcar', from: { name: 'Munich International Airport', lat: 48.3537, lon: 11.775 }, start: '2027-08-21T10:30', end: '2027-08-25T10:00' },
+  ];
+  const legs = driveLegs(dayAgenda(its, '2027-08-21'));
+  assert.equal(legs.filter((l) => l.from === lhr && l.to.name === 'Munich International Airport').length, 0, 'no London → Munich drive');
+});
