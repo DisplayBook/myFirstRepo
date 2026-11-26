@@ -10,6 +10,16 @@ export const canSpeak = () => 'speechSynthesis' in window && typeof window.Speec
 const lang = () => navigator.language || 'en-GB';
 
 /**
+ * iPhone audio mode (Safari 16.4+). While the microphone is in use the phone is
+ * in "record" mode, which plays any sound quietly through the earpiece and
+ * shows the microphone icon. Switching to "playback" before speaking sends it
+ * to the loudspeaker.
+ */
+function audioMode(type) {
+  try { if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type; } catch { /* not supported */ }
+}
+
+/**
  * Listen for one question. Calls onText(text, final) as words come in and
  * onEnd(finalText) when the person stops talking (or stop() is called).
  * onError(code) for problems: 'not-allowed', 'no-speech', 'service-not-allowed', 'network', …
@@ -24,6 +34,16 @@ export function listen({ onText, onEnd, onError } = {}) {
   rec.maxAlternatives = 1;
   let text = '';
   let failed = false;
+  audioMode('play-and-record');
+  // Make sure the microphone is let go once listening ends.
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    rec.onend = null;
+    try { rec.abort(); } catch { /* already stopped */ }
+    audioMode('playback');
+  };
   rec.onresult = (e) => {
     let interim = '';
     let final = '';
@@ -34,8 +54,8 @@ export function listen({ onText, onEnd, onError } = {}) {
     text = (final + interim).trim();
     onText?.(text, !interim);
   };
-  rec.onerror = (e) => { failed = true; onError?.(e.error || 'error'); };
-  rec.onend = () => { if (!failed) onEnd?.(text); };
+  rec.onerror = (e) => { failed = true; release(); onError?.(e.error || 'error'); };
+  rec.onend = () => { const ok = !failed; release(); if (ok) onEnd?.(text); };
   try { rec.start(); } catch { failed = true; onError?.('busy'); }
   return { stop() { try { rec.stop(); } catch { /* already stopped */ } } };
 }
@@ -47,6 +67,7 @@ export function listen({ onText, onEnd, onError } = {}) {
  */
 export function unlockSpeech() {
   if (!canSpeak()) return;
+  audioMode('playback');
   try {
     const u = new SpeechSynthesisUtterance('.');
     u.volume = 0;
@@ -93,6 +114,7 @@ export function speak(text, { onEnd } = {}) {
   const chunks = canSpeak() ? speechChunks(String(text || '').slice(0, 3000)) : [];
   if (!chunks.length) { onEnd?.(); return; }
   const synth = window.speechSynthesis;
+  audioMode('playback');
   const id = ++session;
   let done = false;
   const finish = () => { if (!done) { done = true; onEnd?.(); } };
