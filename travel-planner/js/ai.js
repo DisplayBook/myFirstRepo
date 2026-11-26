@@ -5,7 +5,7 @@
 // the person saved on this device (Trip tab). The key never goes into the shared
 // trip data. The Anthropic SDK is vendored (vendor/anthropic) and loaded on first use.
 
-import { TYPES, addDays, datePart, timePart, daysBetween } from './logic.js';
+import { TYPES, shapeOf, addDays, datePart, timePart, daysBetween } from './logic.js';
 import { parseAmount } from './budget.js';
 
 export const MODEL = 'claude-opus-5-5';
@@ -27,16 +27,16 @@ const BOOKING = {
   type: 'object',
   properties: {
     type: { type: 'string', enum: Object.keys(TYPES) },
-    title: { type: 'string', description: 'Hotel name, activity name, or a short name for a train/bus/ferry ("Eurostar to Paris"). Empty for flights and car hire.' },
+    title: { type: 'string', description: 'Hotel, restaurant, show, artist, tour, car park or activity name, ship name for a cruise, or a short name for a train/bus/ferry ("Eurostar to Paris"). Empty for flights and car hire.' },
     provider: { type: 'string', description: 'Airline, car hire company or operator.' },
     number: { type: 'string', description: 'Flight or service number, e.g. "BA 117".' },
     ref: { type: 'string', description: 'Booking reference / confirmation number.' },
-    seat: { type: 'string', description: 'Seats, terminal, gate or room type, if given.' },
+    seat: { type: 'string', description: 'Seats, coach, cabin, table size, parking space or room type, if given.' },
     start: { type: 'string', description: 'Local date and time as printed: "YYYY-MM-DDTHH:MM", or "YYYY-MM-DD" if no time. Departure, check-in, pick-up or start.' },
     end: { type: 'string', description: 'Same format. Arrival, check-out, drop-off or end. Empty if unknown.' },
-    place: { ...PLACE, description: 'Hotel address or activity location (hotel and activity only).' },
-    from: { ...PLACE, description: 'Departure airport/station or car pick-up location.' },
-    to: { ...PLACE, description: 'Arrival airport/station or car drop-off location (empty if same as pick-up).' },
+    place: { ...PLACE, description: 'Address or venue for hotels, restaurants, shows, tours, activities, meetings and parking.' },
+    from: { ...PLACE, description: 'Departure airport/station/port or car pick-up location.' },
+    to: { ...PLACE, description: 'Arrival airport/station/port or car drop-off location (empty if same as pick-up).' },
     cost: { type: 'string', description: 'Total price as a plain number like "245.50", or empty.' },
     currency: { type: 'string', description: 'ISO 4217 code of the price, e.g. "GBP", or empty.' },
     paid: { type: 'boolean', description: 'True only if the document says the full price is paid / prepaid / charged.' },
@@ -62,7 +62,8 @@ const SYSTEM = `You read travel booking confirmations, tickets and screenshots a
 
 Rules:
 - One entry per booking. Each flight leg, train leg or ferry crossing is its own entry (an outbound and a return flight are two entries).
-- type: flight, hotel, car (car hire), activity (tours, tickets, restaurants, events), transport (train, bus, ferry, coach), drive (only for an explicit planned self-drive route).
+- type: flight; hotel (any lodging); car (car hire / rental); rail (trains); ferry; cruise; transport (bus, coach, taxi, airport transfer); restaurant (table bookings); concert; theater (theatre, opera, ballet, shows); tour (guided tours, excursions); activity (tickets, attractions, classes, anything else to do); meeting; parking (car park bookings); drive (only for an explicit planned self-drive route).
+- For a cruise, from is the embarkation port and to the disembarkation port; start is boarding and end is disembarking.
 - Times are local times exactly as printed on the document. Never convert time zones.
 - If a date has no year, choose the year that puts it on or after the trip's dates or today's date given below.
 - For airports, put the IATA code in the name, e.g. "John F. Kennedy International Airport (JFK)".
@@ -225,6 +226,9 @@ const DEFAULT_TIMES = {
   flight: ['09:00', ''],
   transport: ['09:00', ''],
   drive: ['09:00', ''],
+  restaurant: ['19:30', ''],
+  parking: ['08:00', '18:00'],
+  cruise: ['16:00', '08:00'],
 };
 
 export function normalizeDateTime(s, fallbackTime = '') {
@@ -261,7 +265,7 @@ export function normalizeBookings(raw, { currency = 'USD' } = {}) {
     if (end && (!d.start || end >= d.start)) d.end = end;
     if (b.type === 'hotel' && d.start && !d.end) d.end = `${addDays(datePart(d.start), 1)}T${de}`;
     if (b.type === 'car' && d.start && !d.end) d.end = `${addDays(datePart(d.start), 1)}T${timePart(d.start)}`;
-    if (b.type === 'hotel' || b.type === 'activity') {
+    if (shapeOf(b.type) === 'stay' || shapeOf(b.type) === 'event') {
       const p = place(b.place);
       if (p) d.place = p;
     } else {

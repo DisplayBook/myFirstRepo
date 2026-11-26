@@ -80,7 +80,8 @@ service cloud.firestore {
         allow create, update: if isAdmin(tripId)
           && itemId.size() <= 40
           && request.resource.data.size() < 40
-          && request.resource.data.type in ['flight', 'hotel', 'car', 'drive', 'activity', 'transport'];
+          && request.resource.data.type in ['flight', 'hotel', 'car', 'drive', 'activity', 'transport',
+               'rail', 'ferry', 'cruise', 'restaurant', 'tour', 'concert', 'theater', 'meeting', 'parking', 'note', 'map'];
         allow delete: if isAdmin(tripId);
       }
 

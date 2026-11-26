@@ -621,3 +621,46 @@ test('packing suggestions are based on the trip: dates, season, day by day, stay
   assert.match(ctx, /Already on the list: Helmet \(Alex\)/);
   assert.match(packingTripContext({ meta: {}, items: [] }), /Dates: not set yet/);
 });
+
+test('all booking types: chooser groups, journeys, places, parking and notes', async () => {
+  const { TYPES, TYPE_GROUPS, shapeOf, eventsForItem, dayAgenda, itemTitle, validateItem, toICS } = await import('../../travel-planner/js/logic.js');
+  for (const k of ['flight', 'hotel', 'car', 'drive', 'activity', 'restaurant', 'tour', 'concert', 'theater', 'meeting', 'parking', 'note', 'map', 'rail', 'ferry', 'cruise', 'transport']) {
+    assert.ok(TYPES[k], k);
+    assert.ok(TYPE_GROUPS.some(([g]) => g === TYPES[k].group), `${k} has a group`);
+    assert.ok(TYPES[k].fields.some((f) => f.key === 'start' && f.required), `${k} has a start`);
+  }
+  const rules = (await import('node:fs')).readFileSync(new URL('../../travel-planner/firestore.rules', import.meta.url), 'utf8');
+  for (const k of Object.keys(TYPES)) assert.ok(rules.includes(`'${k}'`), `rules allow ${k}`);
+
+  const rail = { id: 'r', type: 'rail', provider: 'Eurostar', number: '9014', from: { name: 'London St Pancras' }, to: { name: 'Paris Gare du Nord' }, start: '2027-03-01T08:01', end: '2027-03-01T11:20', platform: '5' };
+  assert.equal(shapeOf('rail'), 'journey');
+  assert.equal(itemTitle(rail), 'Eurostar 9014 · London St Pancras → Paris Gare du Nord');
+  assert.deepEqual(eventsForItem(rail).map((e) => e.kind), ['depart', 'arrive']);
+
+  const cruise = { id: 'c', type: 'cruise', title: 'Norwegian Fjords', from: { name: 'Southampton' }, to: { name: 'Southampton' }, start: '2027-06-01T16:00', end: '2027-06-08T08:00' };
+  assert.deepEqual(dayAgenda([cruise], '2027-06-04').ongoing.map((i) => i.id), ['c']);
+  assert.equal(itemTitle(cruise), 'Norwegian Fjords');
+
+  const park = { id: 'p', type: 'parking', title: 'T5 Meet & Greet', place: { name: 'Heathrow T5' }, start: '2027-03-01T05:30', end: '2027-03-08T18:00' };
+  assert.deepEqual(eventsForItem(park).map((e) => [e.kind, e.label]), [['activity', 'Park · T5 Meet & Greet'], ['finish', 'Collect car · T5 Meet & Greet']]);
+  assert.deepEqual(dayAgenda([park], '2027-03-04').ongoing.map((i) => i.id), ['p']);
+  assert.match(toICS({ name: 'T' }, [park]), /Collect car: T5 Meet/);
+
+  const dinner = { id: 'd', type: 'restaurant', title: 'Dishoom', start: '2027-03-02T19:30', guests: '4' };
+  assert.deepEqual(eventsForItem(dinner).map((e) => e.kind), ['activity']);
+  assert.deepEqual(validateItem({ type: 'map', title: 'Viewpoint', start: '2027-03-02T09:00' }), ['Location is required']);
+  assert.deepEqual(validateItem({ type: 'note', title: 'Keys', start: '2027-03-02T09:00' }), []);
+});
+
+test('scanned bookings of the new types keep their place or route', async () => {
+  const { normalizeBookings } = await import('../../travel-planner/js/ai.js');
+  const blank = { title: '', provider: '', number: '', ref: '', seat: '', start: '', end: '', place: { name: '', search: '' }, from: { name: '', search: '' }, to: { name: '', search: '' }, cost: '', currency: '', paid: false, deposit: '', balanceDue: '', notes: '' };
+  const [r, f] = normalizeBookings([
+    { ...blank, type: 'restaurant', title: 'Dishoom', place: { name: 'Dishoom Covent Garden', search: '12 Upper St Martin\'s Ln, London' }, start: '2027-03-02' },
+    { ...blank, type: 'ferry', provider: 'P&O', from: { name: 'Dover', search: 'Dover port' }, to: { name: 'Calais', search: 'Calais port' }, start: '2027-03-03T10:00' },
+  ]);
+  assert.equal(r.place.name, 'Dishoom Covent Garden');
+  assert.equal(r.start, '2027-03-02T19:30');
+  assert.equal(f.from.name, 'Dover');
+  assert.equal(f.to.name, 'Calais');
+});

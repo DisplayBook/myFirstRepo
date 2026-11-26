@@ -1,7 +1,7 @@
 // Packing lists: people on the trip, things to take, ticked off when packed.
 // Pure functions (no DOM), unit-tested.
 
-import { tripSpan, dateRange, dayAgenda, fmtDate, timePart, datePart, daysBetween, itemTitle } from './logic.js';
+import { shapeOf, tripSpan, dateRange, dayAgenda, fmtDate, timePart, datePart, daysBetween, itemTitle } from './logic.js';
 //
 // Entries (one document each, so people can tick at the same time):
 //   person: { id, kind: 'person', name, at }
@@ -162,16 +162,19 @@ export function packingTripContext({ meta = {}, items = [], packing = [] }) {
       out.push(`- ${h.title}${h.place?.name ? `, ${h.place.name}` : ''}: ${fmtDate(datePart(h.start))}${h.end ? ` to ${fmtDate(datePart(h.end))}` : ''}${n ? ` (${n} night${n === 1 ? '' : 's'})` : ''}`);
     }
   }
-  const places = [...new Set(items.flatMap((i) => (i.type === 'flight' || i.type === 'transport' ? [i.to] : i.type === 'drive' ? [i.to] : [i.place, i.from]))
+  const places = [...new Set(items.flatMap((i) => (shapeOf(i.type) === 'journey' || i.type === 'drive' ? [i.to] : [i.place, i.from]))
     .filter((p) => p?.name).map((p) => p.name))].slice(0, 15);
   if (places.length) out.push('', `Destinations to check the weather for: ${places.join(' | ')}`);
-  const activities = items.filter((i) => i.type === 'activity').map((i) => `${i.title}${i.start ? ` (${fmtDate(datePart(i.start))})` : ''}`);
+  const activities = items.filter((i) => shapeOf(i.type) === 'event' && !['note', 'map', 'parking'].includes(i.type)).map((i) => `${i.title}${i.start ? ` (${fmtDate(datePart(i.start))})` : ''}`);
   if (activities.length) out.push(`Planned activities: ${activities.slice(0, 25).join('; ')}`);
   const travel = [
     items.some((i) => i.type === 'flight') && `flying (${items.filter((i) => i.type === 'flight').map(itemTitle).slice(0, 6).join('; ')})`,
     items.some((i) => i.type === 'car') && 'hire car',
     items.some((i) => i.type === 'drive') && 'long drives',
-    items.some((i) => i.type === 'transport') && 'trains/buses/ferries',
+    items.some((i) => i.type === 'rail') && 'trains',
+    items.some((i) => i.type === 'ferry') && 'ferries',
+    items.some((i) => i.type === 'cruise') && 'a cruise',
+    items.some((i) => i.type === 'transport') && 'buses/transfers',
   ].filter(Boolean);
   if (travel.length) out.push(`Getting around: ${travel.join(', ')}`);
   out.push('', `People: ${people.length ? people.map((p) => p.name).join(', ') : 'not listed (use "each" for personal items)'}`);

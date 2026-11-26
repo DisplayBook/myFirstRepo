@@ -22,6 +22,7 @@ function bookingLine(it, home) {
   if (it.terminal) bits.push(`departure terminal ${it.terminal}`);
   if (it.arrTerminal) bits.push(`arrival terminal ${it.arrTerminal}`);
   if (it.seat) bits.push(`seats ${it.seat}`);
+  for (const k of ['platform', 'coach', 'cabin', 'deck', 'room', 'guests', 'doors', 'spot', 'vehicle', 'attendees', 'guide', 'phone']) if (it[k]) bits.push(`${k} ${it[k]}`);
   if (it.type === 'drive') {
     const m = driveMinutes(it);
     if (m != null) bits.push(`drive about ${m} min${it.route?.distanceKm ? `, ${it.route.distanceKm} km` : ''}`);

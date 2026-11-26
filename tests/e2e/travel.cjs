@@ -111,8 +111,8 @@ async function main() {
     });
 
     await check('add a hotel with place search', async () => {
-      await add('Hotel');
-      await page.getByLabel('Hotel name').fill('Hotel Penn');
+      await add('Lodging');
+      await page.getByLabel('Hotel / apartment name').fill('Hotel Penn');
       await pickPlace('Address', 'Hotel Penn NYC');
       await page.getByLabel('Check-in').fill('2026-12-01T15:00');
       await page.getByLabel('Check-out').fill('2026-12-04T11:00');
@@ -134,7 +134,7 @@ async function main() {
       await page.getByLabel('Starts').fill('2026-12-02T10:00');
       await page.getByLabel('Ends').fill('2026-12-02T12:30');
       await save();
-      await add('Car hire');
+      await add('Car rental');
       await page.getByLabel('Company').fill('Hertz');
       await pickPlace('Pick-up location', null, 'Hotel Pennsylvania');
       await page.getByLabel('Pick-up time').fill('2026-12-02T14:00');
@@ -531,8 +531,8 @@ async function main() {
       // Add a suggestion to the plan.
       await page.locator('.brief-ideas li', { hasText: 'Joe\'s Pizza' }).getByRole('button', { name: /Add to plan/ }).click();
       await page.locator('#item-form').waitFor();
-      assert.equal(await page.getByLabel('What').inputValue(), 'Joe\'s Pizza');
-      assert.equal(await page.getByLabel('Starts').inputValue(), '2026-12-02T12:30');
+      assert.equal(await page.locator('#item-form input[name=title]').inputValue(), 'Joe\'s Pizza');
+      assert.equal(await page.getByLabel('Reservation time').inputValue(), '2026-12-02T12:30');
       await page.locator('#sheet').getByRole('button', { name: 'Cancel' }).click();
 
       // Results are kept on the phone.
@@ -612,7 +612,7 @@ async function main() {
       await shot(page, '16-ideas');
       await ideas.getByRole('button', { name: /Add to plan/ }).click();
       await page.locator('#item-form').waitFor();
-      await page.getByLabel('Starts').fill('2026-12-04T12:30');
+      await page.getByLabel('Reservation time').fill('2026-12-04T12:30');
       await page.locator('#save-item').click();
       await page.getByText('Added to the plan and removed from Ideas').waitFor();
       await ideas.getByText(/Save restaurants, activities/).waitFor();
