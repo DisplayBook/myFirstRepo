@@ -55,3 +55,10 @@ test('speech: needs the AI binding, text, and stays under the daily limit', asyn
   assert.equal(res.status, 502);
   assert.match((await res.json()).error.message, /model busy/);
 });
+
+test('speech: a busy or used-up voice service gives a clear 429', async () => {
+  const env = { USAGE: kv(), AI: { run: async () => new Response('{"errors":[{"message":"Too many requests"}]}', { status: 429, headers: { 'content-type': 'application/json' } }) } };
+  const res = await speech({ text: 'Hi' }, env);
+  assert.equal(res.status, 429);
+  assert.match((await res.json()).error.message, /busy, or today's free voice allowance is used up/);
+});
