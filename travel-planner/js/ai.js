@@ -398,6 +398,74 @@ export function flightStatus(apiKey, flight, opts = {}) {
   });
 }
 
+const AIRPORT = (d) => obj({
+  name: str(`${d} airport name with IATA code, e.g. "London Heathrow (LHR)"`),
+  search: str('Text to find it on a map, e.g. "Heathrow Airport, London, UK"'),
+  terminal: str('Terminal, e.g. "5", "2E", "North"; empty if unknown or the airport has one terminal'),
+  time: str('Scheduled local time "HH:MM" (24-hour)'),
+  date: str('Local date "YYYY-MM-DD"'),
+});
+
+export const FLIGHT_LOOKUP_TOOL = {
+  name: 'report_flight_details',
+  description: 'Report the scheduled details of the flight after searching. Call this exactly once.',
+  strict: true,
+  input_schema: obj({
+    found: { type: 'boolean', description: 'False if this flight number doesn\'t operate on that date or nothing reliable was found.' },
+    airline: str('Operating/marketing airline name, e.g. "British Airways"'),
+    flightNumber: str('Flight number as printed, e.g. "BA 117"'),
+    from: AIRPORT('Departure'),
+    to: AIRPORT('Arrival'),
+    aircraft: str('Aircraft type if known, else empty'),
+    note: str('One short sentence if useful (e.g. "Operated by American Airlines", "Has a stop in Dubai"), else empty'),
+    source: str('Site the details came from, e.g. "FlightAware"'),
+  }),
+};
+
+/** Scheduled details (airports, times, terminals) of a flight number on a date. */
+export function flightDetails(auth, { number, date, now }, opts = {}) {
+  return searchAndReport(auth, {
+    ...opts,
+    system: 'You look up airline flight schedules on the web (airline sites, FlightAware, Flightradar24, airport departure pages). Report the scheduled departure and arrival for this flight number on this date: airports with IATA codes, local times and dates, and terminals. Use the local time at each airport. If the flight has several legs, report the leg departing on this date (the first one) and say so in the note. Only report what the sources say; if unsure, set found to false.',
+    prompt: `Flight ${number} on ${date}. Today is ${now}. Find its scheduled details and call report_flight_details.`,
+    tool: FLIGHT_LOOKUP_TOOL,
+    maxSearches: 4,
+  });
+}
+
+/** Turn a flight lookup into fields for the flight form ({} if not found). */
+export function normalizeFlightLookup(raw, date) {
+  if (!raw || !raw.found) return {};
+  const hhmm = (t) => (/^\d{1,2}:\d{2}$/.test(String(t || '').trim()) ? String(t).trim().padStart(5, '0') : '');
+  const ymd = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(String(d || '').trim()) ? String(d).trim() : '');
+  const place = (a) => (a && String(a.name || '').trim() ? { name: String(a.name).trim().slice(0, 200), ...(String(a.search || '').trim() ? { search: String(a.search).trim().slice(0, 200) } : {}) } : undefined);
+  const out = {};
+  if (String(raw.airline || '').trim()) out.provider = String(raw.airline).trim().slice(0, 100);
+  if (String(raw.flightNumber || '').trim()) out.number = String(raw.flightNumber).trim().toUpperCase().slice(0, 20);
+  const f = place(raw.from), t = place(raw.to);
+  if (f) out.from = f;
+  if (t) out.to = t;
+  const depDate = ymd(raw.from?.date) || date;
+  const depTime = hhmm(raw.from?.time);
+  if (depDate && depTime) out.start = `${depDate}T${depTime}`;
+  const arrTime = hhmm(raw.to?.time);
+  if (arrTime && out.start) {
+    let end = `${ymd(raw.to?.date) || depDate}T${arrTime}`;
+    // Arrival "before" departure in local times means it lands the next day.
+    if (end < out.start && !ymd(raw.to?.date)) end = `${addDays(depDate, 1)}T${arrTime}`;
+    if (end >= out.start || ymd(raw.to?.date)) out.end = end;
+  }
+  const term = (x) => {
+    const v = String(x || '').trim().replace(/^(terminal|term\.?)\s*/i, '').replace(/^t(?=\s*\d)\s*/i, '');
+    return /^(tba|tbc|n\/?a|unknown|-)$/i.test(v) ? '' : v.slice(0, 20);
+  };
+  if (term(raw.from?.terminal)) out.terminal = term(raw.from.terminal);
+  if (term(raw.to?.terminal)) out.arrTerminal = term(raw.to.terminal);
+  const notes = [raw.aircraft && `Aircraft: ${String(raw.aircraft).trim()}`, String(raw.note || '').trim()].filter(Boolean).join('. ');
+  if (notes) out.notes = notes.slice(0, 500);
+  return out;
+}
+
 /** Known roadworks, closures and incidents for a drive. `drive`: {from, to, date, time, roads}. */
 export function roadConditions(apiKey, drive, opts = {}) {
   return searchAndReport(apiKey, {
