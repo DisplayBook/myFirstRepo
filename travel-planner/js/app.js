@@ -41,10 +41,21 @@ const t12 = (t) => fmtTime(t, S.settings.h12);
 const dist = (km) => fmtDistance(km, S.settings.unit);
 const isApple = /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent);
 
-function directionsUrl(from, to) {
-  const ll = (p) => `${p.lat},${p.lon}`;
-  if (isApple) return `https://maps.apple.com/?${from ? `saddr=${ll(from)}&` : ''}daddr=${ll(to)}&dirflg=d`;
-  return `https://www.google.com/maps/dir/?api=1${from ? `&origin=${ll(from)}` : ''}&destination=${ll(to)}&travelmode=driving`;
+/** Which maps app links open (Trip → On this device). Google Maps by default. */
+const useApple = () => S.settings.maps === 'apple';
+const placeQuery = (p) => (hasCoords(p) ? `${p.lat},${p.lon}` : String(p?.name || ''));
+
+/**
+ * Directions to a place. With no `from`, the maps app starts from the phone's
+ * current location (it uses its own live location, so the app doesn't need
+ * location permission). `mode` 'driving' for drive legs; none lets Maps choose.
+ */
+function directionsUrl(from, to, { mode = from ? 'driving' : '' } = {}) {
+  const dest = encodeURIComponent(placeQuery(to));
+  if (useApple()) {
+    return `https://maps.apple.com/?${from ? `saddr=${encodeURIComponent(placeQuery(from))}&` : ''}daddr=${dest}${mode === 'driving' ? '&dirflg=d' : ''}`;
+  }
+  return `https://www.google.com/maps/dir/?api=1${from ? `&origin=${encodeURIComponent(placeQuery(from))}` : ''}&destination=${dest}${mode ? `&travelmode=${mode}` : ''}`;
 }
 
 // ---------- toast ----------
@@ -257,23 +268,39 @@ function eventMeta(ev) {
   return bits;
 }
 
+/** Icon for a timeline event: flights show taking off 🛫 and landing 🛬. */
+function evIcon(ev) {
+  if (ev.item.type === 'flight') return ev.kind === 'arrive' ? '🛬' : '🛫';
+  return TYPES[ev.item.type].icon;
+}
+
 const docCount = (itemId) => S.files.filter((f) => f.itemId === itemId).length;
+
+/** Where to go for an event (none for arrivals: you get there by the flight/train). */
+function eventDestination(ev) {
+  if (ev.kind === 'arrive') return null;
+  const p = ev.kind === 'drive' ? ev.endPlace : ev.place;
+  return p && (hasCoords(p) || p.name) ? p : null;
+}
 
 function eventRow(ev, { live = false } = {}) {
   const def = TYPES[ev.item.type];
+  const dest = live ? eventDestination(ev) : null;
+  const goBox = dest ? `<div class="ev-go"><a href="${esc(directionsUrl(null, dest))}" target="_blank" rel="noopener" aria-label="Directions to ${esc(dest.name || 'this place')}">🧭 Directions${shortName(dest) ? ` to ${esc(shortName(dest))}` : ''}</a></div>` : '';
   const liveBox = live ? liveHtml(ev) : '';
   const time = timePart(ev.at);
   const endT = ev.endAt && ev.kind === 'activity' ? `–${t12(timePart(ev.endAt))}` : '';
-  return `<li class="ev" style="--c:${def.color}">
+  return `<li class="ev" style="--c:${def.color}" data-item="${esc(ev.item.id)}">
+    ${canEdit() ? `<button type="button" class="swipe-del" data-item="${esc(ev.item.id)}" tabindex="-1" aria-label="Delete ${esc(itemTitle(ev.item))}">Delete</button>` : ''}
     <button type="button" class="ev-btn" data-edit="${esc(ev.item.id)}" aria-label="${esc(`${t12(time)} ${ev.label}. Edit`)}">
       <span class="ev-time">${esc(t12(time))}<small>${esc(endT)}</small></span>
-      <span class="ev-icon" aria-hidden="true">${def.icon}</span>
+      <span class="ev-icon" aria-hidden="true">${evIcon(ev)}</span>
       <span class="ev-body"><strong>${esc(ev.label)}</strong>
         ${eventMeta(ev).map((b) => `<span class="ev-meta">${esc(b)}</span>`).join('')}
         ${docCount(ev.item.id) && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-docs">📎 ${docCount(ev.item.id)} document${docCount(ev.item.id) === 1 ? '' : 's'}</span>` : ''}
         ${ev.item.notes && ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind) ? `<span class="ev-notes">${esc(ev.item.notes)}</span>` : ''}
       </span>
-    </button>${liveBox}</li>`;
+    </button>${goBox}${liveBox}</li>`;
 }
 
 function legRow(leg, i) {
@@ -342,7 +369,7 @@ function renderToday(arg) {
     if (upcoming) {
       next = `<div class="next" style="--c:${TYPES[upcoming.item.type].color}">
         <span class="next-label">Next up · ${esc(fmtUntil(diffMinutes(now, upcoming.at)))}</span>
-        <strong>${TYPES[upcoming.item.type].icon} ${esc(upcoming.label)}</strong>
+        <strong>${evIcon(upcoming)} ${esc(upcoming.label)}</strong>
         <span>${esc(t12(timePart(upcoming.at)))}${upcoming.place?.name ? ` · ${esc(shortName(upcoming.place))}` : ''}</span></div>`;
     }
   }
@@ -513,7 +540,7 @@ function briefHtml(day) {
   }
   const b = cached.data;
   const icon = { attraction: '🏛️', restaurant: '🍽️', cafe: '☕', bar: '🍸', shopping: '🛍️', event: '🎟️', outdoors: '🌳', other: '📍' };
-  const mapUrl = (q) => (isApple ? `https://maps.apple.com/?q=${encodeURIComponent(q)}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`);
+  const mapUrl = mapSearchUrl;
   return `<h2>✨ Day summary</h2>
     ${b.weather ? `<p class="brief-weather">🌤️ ${esc(b.weather)}</p>` : ''}
     <p>${esc(b.overview)}</p>
@@ -574,7 +601,9 @@ function addIdea(day, i) {
 // ---------- ideas (places to maybe do) ----------
 
 const PLACE_ICON = { attraction: '🏛️', restaurant: '🍽️', cafe: '☕', bar: '🍸', shopping: '🛍️', event: '🎟️', outdoors: '🌳', other: '📍' };
-const mapSearchUrl = (q) => (isApple ? `https://maps.apple.com/?q=${encodeURIComponent(q)}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`);
+function mapSearchUrl(q) {
+  return useApple() ? `https://maps.apple.com/?q=${encodeURIComponent(q)}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+}
 const ideasList = () => (Array.isArray(S.meta.ideas) ? S.meta.ideas : []);
 
 /** Save a suggested place to the trip's shared Ideas list. */
@@ -687,10 +716,10 @@ async function renderMap(arg) {
   const onDay = (it) => !day || eventsForItem(it).some((e) => datePart(e.at) === day) || (it.type === 'hotel' && hotelForNight([it], day));
   const items = S.items.filter(onDay);
   const markers = new Map();
-  const addMarker = (p, it, line) => {
+  const addMarker = (p, it, line, icon) => {
     if (!hasCoords(p)) return;
     const k = `${(+p.lat).toFixed(4)},${(+p.lon).toFixed(4)}`;
-    const m = markers.get(k) || { lat: +p.lat, lon: +p.lon, color: TYPES[it.type].color, icon: TYPES[it.type].icon, lines: [], title: p.name, place: p };
+    const m = markers.get(k) || { lat: +p.lat, lon: +p.lon, color: TYPES[it.type].color, icon: icon || TYPES[it.type].icon, lines: [], title: p.name, place: p };
     m.lines.push(line);
     markers.set(k, m);
   };
@@ -700,8 +729,8 @@ async function renderMap(arg) {
     switch (it.type) {
       case 'flight':
       case 'transport':
-        addMarker(it.from, it, `${itemTitle(it)} · departs ${when(it.start)}`);
-        addMarker(it.to, it, `${itemTitle(it)} · arrives ${when(it.end) || '?'}`);
+        addMarker(it.from, it, `${itemTitle(it)} · departs ${when(it.start)}`, it.type === 'flight' ? '🛫' : '');
+        addMarker(it.to, it, `${itemTitle(it)} · arrives ${when(it.end) || '?'}`, it.type === 'flight' ? '🛬' : '');
         if (hasCoords(it.from) && hasCoords(it.to)) {
           lines.push(it.type === 'flight'
             ? { points: greatCircle(it.from, it.to), color: TYPES.flight.color, dash: '8 8', weight: 3 }
@@ -909,6 +938,7 @@ function renderTripSettings() {
         <div class="two">
           <label>Time format<select name="h12"><option value="0">24-hour</option><option value="1" ${S.settings.h12 ? 'selected' : ''}>12-hour</option></select></label>
           <label>Distances<select name="unit"><option value="km">km</option><option value="mi" ${S.settings.unit === 'mi' ? 'selected' : ''}>miles</option></select></label>
+          <label>Directions open in<select name="maps"><option value="google">Google Maps</option><option value="apple" ${S.settings.maps === 'apple' ? 'selected' : ''}>Apple Maps</option></select></label>
         </div>
       </form>
     </section>
@@ -982,7 +1012,7 @@ function renderTripSettings() {
   if (aiOff) aiOff.onclick = () => { S.settings = store.setSettings({ aiKey: '' }); toast('Key removed from this device'); render(); };
   $('#prefs').onchange = (e) => {
     const fd = new FormData(e.currentTarget);
-    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit') });
+    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps') });
   };
   if (cloud) {
     let code = '';
@@ -1215,7 +1245,8 @@ function mountPlace(el, { label, value, required, onChange }) {
     const id = `pf-${Math.random().toString(36).slice(2, 8)}`;
     el.innerHTML = `<span class="lbl" id="${id}">${esc(label)}${required ? ' <span class="req">*</span>' : ''}</span>` + (val
       ? `<div class="place-chosen"><span>📍 ${esc(val.name)}${hasCoords(val) ? '' : ' <small class="muted">(no map location)</small>'}</span>
-          <button type="button" class="link" data-a="clear">Change</button></div>`
+          <span class="place-actions"><a class="link" href="${esc(directionsUrl(null, val))}" target="_blank" rel="noopener">🧭 Directions</a>
+          <button type="button" class="link" data-a="clear">Change</button></span></div>`
       : `<div class="place-search"><input type="search" enterkeyhint="search" autocomplete="off" aria-labelledby="${id}" placeholder="Search place, address or airport" value="${esc(q)}">
           <button type="button" class="btn small" data-a="search">Search</button></div>
         <div class="place-quick">${known.map((p, i) => `<button type="button" class="chip" data-a="known" data-i="${i}">${esc(shortName(p))}</button>`).join('')}
@@ -1501,18 +1532,103 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
   const del = $('#del-item');
   if (del) del.onclick = async () => {
     if (!confirm(`Delete "${itemTitle(existing)}"?`)) return;
-    await write((b, id) => b.deleteItem(id, existing.id));
     closeSheet();
-    let undone = false;
-    const tripId = S.trip.id;
-    toast('Deleted', { label: 'Undo', run: () => { undone = true; write((b, id) => b.saveItem(id, existing)); } });
-    // Remove its documents once the chance to undo has passed.
-    setTimeout(() => {
-      if (undone || S.trip?.id !== tripId || S.items.some((i) => i.id === existing.id)) return;
-      for (const f of S.files.filter((x) => x.itemId === existing.id)) write((b, id) => b.deleteFile(id, f)).catch(() => {});
-    }, 8000);
+    deleteWithUndo(existing);
   };
 }
+
+/** Delete a booking, offering Undo; its documents go once the undo chance has passed. */
+async function deleteWithUndo(item) {
+  try { await write((b, id) => b.deleteItem(id, item.id)); } catch { return; }
+  let undone = false;
+  const tripId = S.trip.id;
+  // Short name for the message: "BA 178", "Hotel Penn", "Car hire · Hertz"…
+  const name = (item.type === 'flight' && item.number) || itemTitle(item).split(' · ')[0] || 'booking';
+  toast(`Deleted ${name.length > 32 ? `${name.slice(0, 31)}…` : name}`, { label: 'Undo', run: () => { undone = true; write((b, id) => b.saveItem(id, item)); } });
+  setTimeout(() => {
+    if (undone || S.trip?.id !== tripId || S.items.some((i) => i.id === item.id)) return;
+    for (const f of S.files.filter((x) => x.itemId === item.id)) write((b, id) => b.deleteFile(id, f)).catch(() => {});
+  }, 8000);
+}
+
+// ---------- swipe left to delete (timeline tiles) ----------
+
+const SWIPE_OPEN = 96; // px the Delete button needs
+let swipe = null; // { li, x0, y0, dx, horizontal, pointerId }
+let swipeOpen = null; // li currently showing Delete
+let swipeJustMoved = false;
+
+function setSwipe(li, dx, animate) {
+  li.classList.toggle('swipe-anim', !!animate);
+  li.style.setProperty('--dx', `${dx}px`);
+  li.classList.toggle('swiped', dx < 0);
+}
+function closeSwipe() {
+  if (swipeOpen) { setSwipe(swipeOpen, 0, true); swipeOpen = null; }
+}
+
+main.addEventListener('pointerdown', (e) => {
+  const li = e.target.closest('.ev');
+  if (e.target.closest('.swipe-del')) return;
+  swipeJustMoved = false;
+  if (swipeOpen && swipeOpen !== li) closeSwipe();
+  if (!li || !canEdit() || e.button > 0) return;
+  swipe = { li, x0: e.clientX, y0: e.clientY, dx: 0, horizontal: null, pointerId: e.pointerId, start: swipeOpen === li ? -SWIPE_OPEN : 0 };
+});
+main.addEventListener('pointermove', (e) => {
+  if (!swipe || e.pointerId !== swipe.pointerId) return;
+  const dx = e.clientX - swipe.x0, dy = e.clientY - swipe.y0;
+  if (swipe.horizontal === null) {
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+    swipe.horizontal = Math.abs(dx) > Math.abs(dy);
+    if (!swipe.horizontal) { swipe = null; return; } // a vertical scroll
+    swipe.li.setPointerCapture?.(e.pointerId);
+  }
+  swipe.dx = Math.min(0, swipe.start + dx);
+  setSwipe(swipe.li, swipe.dx, false);
+});
+function endSwipe(e) {
+  if (!swipe || e.pointerId !== swipe.pointerId) return;
+  const { li, dx, horizontal } = swipe;
+  swipe = null;
+  if (!horizontal) return;
+  swipeJustMoved = true; // the click that follows this release is ignored (see below)
+  const width = li.getBoundingClientRect().width;
+  if (dx < -width * 0.6) { // long swipe: delete straight away
+    setSwipe(li, -width, true);
+    const it = S.items.find((i) => i.id === li.dataset.item);
+    swipeOpen = null;
+    if (it) setTimeout(() => deleteWithUndo(it), 150);
+  } else if (dx < -SWIPE_OPEN / 2) {
+    setSwipe(li, -SWIPE_OPEN, true);
+    swipeOpen = li;
+  } else {
+    setSwipe(li, 0, true);
+    if (swipeOpen === li) swipeOpen = null;
+  }
+}
+main.addEventListener('pointerup', endSwipe);
+main.addEventListener('pointercancel', endSwipe);
+// After a swipe, don't treat the release as a tap that opens the booking.
+main.addEventListener('click', (e) => {
+  if (swipeJustMoved) {
+    swipeJustMoved = false;
+    if (e.target.closest('.ev')) { e.stopImmediatePropagation(); e.preventDefault(); return; }
+  }
+  const d = e.target.closest('.swipe-del');
+  if (d) {
+    e.stopImmediatePropagation();
+    const it = S.items.find((i) => i.id === d.dataset.item);
+    swipeOpen = null;
+    if (it) deleteWithUndo(it);
+    return;
+  }
+  if (swipeOpen) {
+    // A tap anywhere while Delete is showing just closes it.
+    if (swipeOpen.contains(e.target)) { e.stopImmediatePropagation(); e.preventDefault(); }
+    closeSwipe();
+  }
+}, true);
 
 // Stand-alone "how long to drive from A to B?" calculator.
 function openDriveCalc() {
