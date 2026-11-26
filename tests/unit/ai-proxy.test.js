@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import worker from '../../workers/trip-ai/worker.js';
+import worker, { makeHandler, verifyFirebaseToken, checkBody } from '../worker-loader.mjs';
 
-const { makeHandler, verifyFirebaseToken, checkBody } = worker._test;
+test('proxy: the deployable file only exports fetch', () => {
+  assert.deepEqual(Object.keys(worker), ['fetch']);
+});
 
 const PROJECT = 'my-travel-planner-57cef';
 const ORIGIN = 'https://displaybook.github.io';
