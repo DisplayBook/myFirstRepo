@@ -29,7 +29,7 @@ const writeJSON = (k, v) => {
 
 // ---------- device-only preferences ----------
 
-export const DEFAULT_SETTINGS = { name: '', h12: false, unit: 'km', currentTrip: '', aiKey: '', maps: 'google', tiles: 'compact' };
+export const DEFAULT_SETTINGS = { name: '', h12: false, unit: 'km', currentTrip: '', aiKey: '', maps: 'google', tiles: 'compact', voiceReplies: true };
 export function getSettings() { return { ...DEFAULT_SETTINGS, ...readJSON(SETTINGS, {}) }; }
 export function setSettings(patch) { const s = { ...getSettings(), ...patch }; writeJSON(SETTINGS, s); return s; }
 

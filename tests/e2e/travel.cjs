@@ -72,6 +72,27 @@ async function main() {
 
     // Most checks read tile details, so start phones with tiles expanded (compact is tested separately).
     await context.addInitScript(() => { if (!localStorage.getItem('tp:settings')) localStorage.setItem('tp:settings', JSON.stringify({ tiles: 'full' })); });
+    await context.addInitScript(() => {
+      window.__spoken = [];
+      window.__say = '';
+      class FakeRecognition {
+        start() {
+          setTimeout(() => {
+            this.onresult?.({ results: [Object.assign([{ transcript: window.__say.slice(0, 12) }], { isFinal: false })] });
+            setTimeout(() => {
+              this.onresult?.({ results: [Object.assign([{ transcript: window.__say }], { isFinal: true })] });
+              this.onend?.();
+            }, 60);
+          }, 60);
+        }
+        stop() {}
+      }
+      window.SpeechRecognition = FakeRecognition;
+      window.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) { this.text = text; };
+      Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
+        speak(u) { if (u.text.trim()) window.__spoken.push(u.text); setTimeout(() => u.onend?.(), 30); }, cancel() {}, getVoices() { return []; },
+      } });
+    });
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
@@ -626,6 +647,44 @@ async function main() {
       page.once('dialog', (d) => d.accept());
       await ideas.getByRole('button', { name: 'Remove' }).click();
       await ideas.getByText(/Save restaurants, activities/).waitFor();
+    });
+
+    await check('voice: ask by voice, the question is sent, the answer is read aloud', async () => {
+      await page.goto(`${BASE}#/today/2026-12-02`);
+      await page.evaluate(() => { window.__say = 'Where can we eat near the hotel'; window.__spoken = []; });
+      await page.getByRole('button', { name: 'Ask about this trip' }).click();
+      await page.getByRole('button', { name: 'New chat' }).click();
+      const before = calls.filter((c) => c.body.stream).length;
+      await page.getByRole('button', { name: 'Ask by voice' }).click();
+      await page.locator('.msg.me', { hasText: 'Where can we eat near the hotel' }).waitFor();
+      await page.locator('.msg.bot', { hasText: 'Katz' }).first().waitFor();
+      const req = calls.filter((c) => c.body.stream)[before].body;
+      assert.match(JSON.stringify(req.messages.at(-1).content), /Asked by voice/, 'asks for a short spoken answer');
+      await page.waitForFunction(() => window.__spoken.some((t) => /Katz/.test(t)));
+      const said = await page.evaluate(() => window.__spoken.find((t) => /Katz/.test(t)));
+      assert.doesNotMatch(said, /\*\*|\n|^- /m, 'read as plain sentences');
+      assert.match(said, /Katz's Delicatessen for lunch\./);
+      // Any answer can be read again; the saved question has no voice note.
+      await page.evaluate(() => { window.__spoken = []; });
+      await page.locator('.msg.bot').last().getByRole('button', { name: 'Read this answer aloud' }).click();
+      await page.waitForFunction(() => window.__spoken.length === 1);
+      assert.doesNotMatch(await page.evaluate(() => localStorage.getItem(Object.keys(localStorage).find((k) => k.startsWith('tp:chat:')))), /Asked by voice/);
+      await shot(page, '17-voice');
+      // Text only: answers to voice questions aren't read out.
+      await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
+      await page.goto(`${BASE}#/trip`);
+      await page.getByLabel('Answers to 🎤 questions').selectOption('0');
+      await page.goto(`${BASE}#/today/2026-12-02`);
+      await page.evaluate(() => { window.__spoken = []; window.__say = 'Is it far'; });
+      await page.getByRole('button', { name: 'Ask about this trip' }).click();
+      await page.getByRole('button', { name: 'Ask by voice' }).click();
+      await page.locator('.msg.me', { hasText: 'Is it far' }).waitFor();
+      await page.locator('#chat-send:not([disabled])').waitFor();
+      await page.waitForTimeout(300);
+      assert.deepEqual(await page.evaluate(() => window.__spoken), []);
+      await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
+      await page.goto(`${BASE}#/trip`);
+      await page.getByLabel('Answers to 🎤 questions').selectOption('1');
     });
 
     await check('add a flight from just the flight number and date', async () => {

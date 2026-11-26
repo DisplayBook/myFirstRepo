@@ -664,3 +664,11 @@ test('scanned bookings of the new types keep their place or route', async () => 
   assert.equal(f.from.name, 'Dover');
   assert.equal(f.to.name, 'Calais');
 });
+
+test('voice: answers are read aloud as plain sentences', async () => {
+  const { speakableText, VOICE_NOTE } = await import('../../travel-planner/js/chat.js');
+  assert.equal(speakableText('## Hotel\n\nYour ref is **HP-778**.\n\n- Check-in from 15:00\n- Breakfast 7–10\n\nSee [the site](https://x.com) for more'),
+    'Hotel. Your ref is HP-778. Check-in from 15:00. Breakfast 7 to 10. See the site for more');
+  assert.equal(speakableText('| a | b |\n|---|---|\n| 1 | 2 |\nDone'), 'Done');
+  assert.match(VOICE_NOTE, /read aloud/);
+});
