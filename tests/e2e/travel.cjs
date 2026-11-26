@@ -90,7 +90,9 @@ async function main() {
       window.SpeechRecognition = FakeRecognition;
       window.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) { this.text = text; };
       Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
-        speak(u) { if (u.text.trim()) window.__spoken.push(u.text); setTimeout(() => u.onend?.(), 30); }, cancel() {}, getVoices() { return []; },
+        speaking: false, pending: false, paused: false,
+        // Silent utterances (the tap-to-unlock) aren't heard, so aren't recorded.
+        speak(u) { if (u.text.trim() && u.volume !== 0) window.__spoken.push(u.text); setTimeout(() => u.onend?.(), 30); }, cancel() {}, getVoices() { return []; },
       } });
     });
     const page = await context.newPage();
@@ -661,13 +663,13 @@ async function main() {
       const req = calls.filter((c) => c.body.stream)[before].body;
       assert.match(JSON.stringify(req.messages.at(-1).content), /Asked by voice/, 'asks for a short spoken answer');
       await page.waitForFunction(() => window.__spoken.some((t) => /Katz/.test(t)));
-      const said = await page.evaluate(() => window.__spoken.find((t) => /Katz/.test(t)));
+      const said = await page.evaluate(() => window.__spoken.join(' '));
       assert.doesNotMatch(said, /\*\*|\n|^- /m, 'read as plain sentences');
       assert.match(said, /Katz's Delicatessen for lunch\./);
       // Any answer can be read again; the saved question has no voice note.
       await page.evaluate(() => { window.__spoken = []; });
       await page.locator('.msg.bot').last().getByRole('button', { name: 'Read this answer aloud' }).click();
-      await page.waitForFunction(() => window.__spoken.length === 1);
+      await page.waitForFunction(() => window.__spoken.join(' ').includes('Top of the Rock'));
       assert.doesNotMatch(await page.evaluate(() => localStorage.getItem(Object.keys(localStorage).find((k) => k.startsWith('tp:chat:')))), /Asked by voice/);
       await shot(page, '17-voice');
       // Text only: answers to voice questions aren't read out.
@@ -827,6 +829,11 @@ async function main() {
     });
 
     await check('packing list: people, items for each/shared, tick, hide packed, templates, AI suggestions', async () => {
+      // Lists re-render after each change: wait for the expected count rather than reading it once.
+      const countIs = async (locator, n, what) => {
+        for (let i = 0; i < 50 && await locator.count() !== n; i++) await page.waitForTimeout(100);
+        assert.equal(await locator.count(), n, what);
+      };
       await page.goto(`${BASE}#/plan`);
       await page.locator('.pack-card').click();
       await page.getByRole('heading', { name: '🎒 Packing' }).waitFor();
@@ -842,7 +849,7 @@ async function main() {
       await page.getByLabel('Category').selectOption('clothes');
       await page.getByRole('button', { name: 'Add', exact: true }).last().click();
       await page.getByText('Added for 2 people').waitFor();
-      assert.equal(await page.locator('.pk', { hasText: 'Ski jacket' }).count(), 2);
+      await countIs(page.locator('.pk', { hasText: 'Ski jacket' }), 2);
       // A shared item with a quantity.
       await page.getByLabel('What to take').fill('Sun cream');
       await page.getByLabel('How many').fill('2');
@@ -863,8 +870,8 @@ async function main() {
       page.once('dialog', (d) => { assert.match(d.message(), /Ski trip/); d.accept(); });
       await page.locator('#pk-template').selectOption('ski');
       await page.getByText(/items added/).waitFor();
-      assert.equal(await page.locator('.pk', { hasText: 'Ski jacket' }).count(), 2, 'no duplicate jackets');
       await page.locator('.pk', { hasText: 'Goggles' }).first().waitFor();
+      await countIs(page.locator('.pk', { hasText: 'Ski jacket' }), 2, 'no duplicate jackets');
       // AI suggestions: review and add.
       await page.getByRole('button', { name: '✨ Suggest a list' }).click();
       await page.getByRole('heading', { name: /Suggested: 4 items/ }).waitFor();
@@ -878,12 +885,14 @@ async function main() {
       await page.locator('#pk-suggest .pk', { hasText: 'US plug adapter' }).getByRole('checkbox').uncheck();
       await page.getByRole('button', { name: 'Add selected' }).click();
       await page.getByText('3 items added').waitFor();
+      // The suggestions sheet is emptied just after it closes; then only the packing list is left.
+      await page.locator('#pk-suggest').waitFor({ state: 'detached' });
       await page.locator('.pk-section', { hasText: '🙂 Mia' }).getByText('Kids ski gloves').waitFor();
-      assert.equal(await page.locator('.pk', { hasText: 'US plug adapter' }).count(), 0);
+      await countIs(page.locator('.pk', { hasText: 'US plug adapter' }), 0, 'the unticked suggestion is not added');
       await shot(page, '21-packing');
       // Filter to one person, then remove them.
       await page.locator('.pk-people').getByRole('button', { name: /^Mia/ }).click();
-      assert.equal(await page.locator('.pk-section').count(), 1);
+      await countIs(page.locator('.pk-section'), 1);
       page.once('dialog', (d) => d.accept());
       await page.getByRole('button', { name: 'Remove Mia and their list' }).click();
       await page.locator('.pk-people').getByRole('button', { name: /^Mia/ }).waitFor({ state: 'detached' });
