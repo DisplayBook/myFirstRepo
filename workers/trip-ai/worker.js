@@ -187,9 +187,8 @@ function makeHandler(opts = {}) {
 }
 
 const handler = makeHandler();
-// Only a default export, so the file can be pasted into the Cloudflare editor as-is.
-// _test exposes the helpers to the repo's tests; Cloudflare ignores it.
+// Only a default export with fetch, so the file can be pasted into the Cloudflare
+// editor as-is. (The repo's tests load the helpers with tests/worker-loader.mjs.)
 export default {
   fetch: (request, env) => handler(request, env),
-  _test: { makeHandler, verifyFirebaseToken, checkBody },
 };
