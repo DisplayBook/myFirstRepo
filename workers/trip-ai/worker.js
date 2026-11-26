@@ -14,9 +14,14 @@
 // Then the key is added and the request is passed to Anthropic; the answer
 // (including streamed answers) is passed straight back.
 //
-// Setup (Cloudflare dashboard): see "Shared AI key" in the README.
+// It also sends trip reminders as push notifications (/push/*): phones register
+// for a trip, the app sends the trip's reminder list, and a cron trigger
+// (every 5 minutes) sends whatever is due. Uses the same sign-in and trip checks.
+//
+// Setup (Cloudflare dashboard): see "Shared AI key" and "Reminders" in the README.
 //   Secret:    ANTHROPIC_API_KEY
-//   KV:        USAGE (optional but recommended, for the daily limit)
+//   KV:        USAGE (needed for reminders; also the AI daily limit)
+//   Trigger:   cron "*/5 * * * *" (for reminders)
 //   Variables: ACCESS, DAILY_LIMIT (optional; defaults below)
 
 const DEFAULTS = {
@@ -92,6 +97,202 @@ function checkBody(body) {
   return '';
 }
 
+
+// ---------- push notifications (Web Push: RFC 8030, 8291, 8292) ----------
+
+const PUSH_HOSTS = [/^fcm\.googleapis\.com$/, /^android\.googleapis\.com$/, /(^|\.)push\.apple\.com$/,
+  /^updates\.push\.services\.mozilla\.com$/, /(^|\.)push\.services\.mozilla\.com$/, /(^|\.)notify\.windows\.com$/];
+const KINDS = ['leave', 'flight', 'checkin', 'stay', 'car', 'payment', 'packing', 'morning'];
+const MAX_REMINDERS = 300;
+const LATE_MS = 45 * 60 * 1000; // still send a reminder up to 45 min late (missed cron runs)
+
+const enc = new TextEncoder();
+const bytesToB64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const concat = (...arrs) => {
+  const out = new Uint8Array(arrs.reduce((n, a) => n + a.length, 0));
+  let o = 0;
+  for (const a of arrs) { out.set(a, o); o += a.length; }
+  return out;
+};
+async function hkdf(salt, ikm, info, length) {
+  const key = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, length * 8));
+}
+
+/** The app's push key pair (made once, kept in KV). */
+async function vapidKeys(kv) {
+  const saved = await kv.get('p:vapid', 'json');
+  if (saved?.publicKey && saved?.jwk) return saved;
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const keys = {
+    publicKey: bytesToB64url(await crypto.subtle.exportKey('raw', pair.publicKey)),
+    jwk: await crypto.subtle.exportKey('jwk', pair.privateKey),
+  };
+  await kv.put('p:vapid', JSON.stringify(keys));
+  return keys;
+}
+
+/** VAPID authorization header for a push service (RFC 8292). */
+async function vapidAuth(endpoint, keys, subject, nowSec = Math.floor(Date.now() / 1000)) {
+  const header = bytesToB64url(enc.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const claims = bytesToB64url(enc.encode(JSON.stringify({ aud: new URL(endpoint).origin, exp: nowSec + 12 * 3600, sub: subject })));
+  const key = await crypto.subtle.importKey('jwk', { ...keys.jwk, key_ops: ['sign'] }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, enc.encode(`${header}.${claims}`));
+  return `vapid t=${header}.${claims}.${bytesToB64url(sig)}, k=${keys.publicKey}`;
+}
+
+/**
+ * Encrypt a push message for one phone (RFC 8291, aes128gcm). `fixed` (tests
+ * only) supplies the salt and the sender's key pair so results are repeatable.
+ */
+async function encryptPush(plaintext, p256dh, authSecret, fixed = null) {
+  const uaPublic = b64urlToBytes(p256dh);
+  const auth = b64urlToBytes(authSecret);
+  const salt = fixed?.salt || crypto.getRandomValues(new Uint8Array(16));
+  const asPair = fixed?.keyPair || await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const asPublic = new Uint8Array(await crypto.subtle.exportKey('raw', asPair.publicKey));
+  const uaKey = await crypto.subtle.importKey('raw', uaPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const shared = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, asPair.privateKey, 256));
+  const ikm = await hkdf(auth, shared, concat(enc.encode('WebPush: info\0'), uaPublic, asPublic), 32);
+  const cek = await hkdf(salt, ikm, enc.encode('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(salt, ikm, enc.encode('Content-Encoding: nonce\0'), 12);
+  const key = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
+  const data = typeof plaintext === 'string' ? enc.encode(plaintext) : plaintext;
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, concat(data, new Uint8Array([2]))));
+  const rs = new Uint8Array([0, 0, 16, 0]); // record size 4096
+  return concat(salt, rs, new Uint8Array([asPublic.length]), asPublic, ct);
+}
+
+/** Send one notification. Returns the push service's status (404/410 = phone gone). */
+async function sendPush(sub, message, keys, subject, fetchImpl) {
+  const body = await encryptPush(JSON.stringify(message), sub.keys.p256dh, sub.keys.auth);
+  const res = await fetchImpl(sub.endpoint, {
+    method: 'POST',
+    headers: {
+      authorization: await vapidAuth(sub.endpoint, keys, subject),
+      'content-encoding': 'aes128gcm', 'content-type': 'application/octet-stream',
+      ttl: String(4 * 3600), urgency: 'high',
+    },
+    body,
+  });
+  return res.status;
+}
+
+const subId = async (endpoint) => bytesToB64url(await crypto.subtle.digest('SHA-256', enc.encode(endpoint))).slice(0, 22);
+
+function validSubscription(sub) {
+  if (!sub || typeof sub !== 'object' || typeof sub.endpoint !== 'string' || sub.endpoint.length > 1000) return false;
+  let u;
+  try { u = new URL(sub.endpoint); } catch { return false; }
+  if (u.protocol !== 'https:' || !PUSH_HOSTS.some((re) => re.test(u.hostname))) return false;
+  const k = sub.keys || {};
+  return /^[A-Za-z0-9_-]{80,100}$/.test(k.p256dh || '') && /^[A-Za-z0-9_-]{16,32}$/.test(k.auth || '');
+}
+
+/** Keep only well-formed reminders, trimmed to size. */
+function cleanReminders(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const r of list.slice(0, MAX_REMINDERS)) {
+    if (!r || typeof r !== 'object' || !KINDS.includes(r.kind) || !Number.isFinite(r.at)) continue;
+    out.push({
+      id: String(r.id || '').slice(0, 80), kind: r.kind, at: Math.round(r.at),
+      title: String(r.title || '').slice(0, 100), body: String(r.body || '').slice(0, 300),
+      day: /^\d{4}-\d{2}-\d{2}$/.test(r.day || '') ? r.day : '',
+    });
+  }
+  return out;
+}
+
+const jsonResponse = (data, cors, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', ...cors } });
+
+async function updateIndex(kv, tripId, lastAt) {
+  const index = (await kv.get('p:index', 'json')) || {};
+  if (lastAt) { if (index[tripId] === lastAt) return; index[tripId] = lastAt; } else { if (!(tripId in index)) return; delete index[tripId]; }
+  await kv.put('p:index', JSON.stringify(index));
+}
+
+/** /push/* requests (already checked: origin, sign-in, trip membership). */
+async function handlePush(path, body, { kv, tripId, cors, subject, fetchImpl }) {
+  const subsKey = `p:subs:${tripId}`, schedKey = `p:sched:${tripId}`;
+  if (path === '/push/subscribe') {
+    if (!validSubscription(body.subscription)) return errorResponse(400, 'invalid_request_error', 'this phone\'s notification address isn\'t supported', cors);
+    const kinds = (Array.isArray(body.kinds) ? body.kinds : KINDS).filter((k) => KINDS.includes(k));
+    const subs = (await kv.get(subsKey, 'json')) || {};
+    if (Object.keys(subs).length >= 30) return errorResponse(400, 'invalid_request_error', 'too many phones have reminders on for this trip', cors);
+    const { endpoint, keys } = body.subscription;
+    subs[await subId(endpoint)] = { endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth }, kinds, name: String(body.name || '').slice(0, 40), at: Date.now() };
+    await kv.put(subsKey, JSON.stringify(subs));
+    return jsonResponse({ ok: true, phones: Object.keys(subs).length }, cors);
+  }
+  if (path === '/push/unsubscribe') {
+    const subs = (await kv.get(subsKey, 'json')) || {};
+    const id = await subId(String(body.endpoint || ''));
+    if (subs[id]) {
+      delete subs[id];
+      if (Object.keys(subs).length) await kv.put(subsKey, JSON.stringify(subs));
+      else { await kv.delete(subsKey); await kv.delete(schedKey); await updateIndex(kv, tripId, 0); }
+    }
+    return jsonResponse({ ok: true }, cors);
+  }
+  if (path === '/push/schedule') {
+    const reminders = cleanReminders(body.reminders);
+    if (!reminders) return errorResponse(400, 'invalid_request_error', 'bad reminder list', cors);
+    const subs = await kv.get(subsKey, 'json');
+    if (!subs || !Object.keys(subs).length) return jsonResponse({ ok: true, stored: false, phones: 0 }, cors);
+    const hash = String(body.hash || '').slice(0, 40);
+    const old = await kv.get(schedKey, 'json');
+    if (!(old && hash && old.hash === hash)) await kv.put(schedKey, JSON.stringify({ hash, reminders, at: Date.now() }));
+    await updateIndex(kv, tripId, reminders.length ? reminders[reminders.length - 1].at : 0);
+    return jsonResponse({ ok: true, stored: true, phones: Object.keys(subs).length }, cors);
+  }
+  if (path === '/push/test') {
+    const subs = (await kv.get(subsKey, 'json')) || {};
+    const sub = subs[await subId(String(body.endpoint || ''))];
+    if (!sub) return errorResponse(404, 'not_found_error', 'reminders aren\'t on for this phone yet', cors);
+    const status = await sendPush(sub, { title: '🔔 Reminders are working', body: 'You\'ll get trip reminders like this one.', tag: 'test', url: `#/trip//${tripId}` },
+      await vapidKeys(kv), subject, fetchImpl);
+    return status < 300 ? jsonResponse({ ok: true }, cors) : errorResponse(502, 'api_error', `the notification service said ${status}`, cors);
+  }
+  return errorResponse(404, 'not_found_error', 'not found', cors);
+}
+
+/** Cron: send every reminder that is due. */
+async function sendDue(env, { now = Date.now(), fetchImpl = (...a) => fetch(...a) } = {}) {
+  const kv = env.USAGE;
+  if (!kv) return { sent: 0 };
+  const cfg = { ...DEFAULTS, ...Object.fromEntries(Object.entries(env).filter(([, v]) => typeof v === 'string')) };
+  const subject = cfg.PUSH_CONTACT || `${cfg.ALLOWED_ORIGIN}/`;
+  const index = (await kv.get('p:index', 'json')) || {};
+  let sent = 0, keys = null;
+  for (const [tripId, lastAt] of Object.entries(index)) {
+    if (lastAt < now - 2 * 3600000) { await updateIndex(kv, tripId, 0); await kv.delete(`p:sched:${tripId}`); continue; }
+    const sched = await kv.get(`p:sched:${tripId}`, 'json');
+    const due = (sched?.reminders || []).filter((r) => r.at <= now && r.at > now - LATE_MS);
+    if (!due.length) continue;
+    const sentKey = `p:sent:${tripId}`;
+    const done = new Set((await kv.get(sentKey, 'json')) || []);
+    const todo = due.filter((r) => !done.has(`${r.id}@${r.at}`));
+    if (!todo.length) continue;
+    const subs = (await kv.get(`p:subs:${tripId}`, 'json')) || {};
+    keys = keys || await vapidKeys(kv);
+    let gone = false;
+    for (const r of todo) {
+      done.add(`${r.id}@${r.at}`);
+      for (const [id, sub] of Object.entries(subs)) {
+        if (!(sub.kinds || KINDS).includes(r.kind)) continue;
+        const msg = { title: r.title, body: r.body, tag: r.id, url: r.day ? `#/today/${r.day}/${tripId}` : `#/today//${tripId}` };
+        let status = 0;
+        try { status = await sendPush(sub, msg, keys, subject, fetchImpl); } catch { status = 0; }
+        if (status === 404 || status === 410) { delete subs[id]; gone = true; } else if (status && status < 300) sent++;
+      }
+    }
+    await kv.put(sentKey, JSON.stringify([...done].slice(-500)), { expirationTtl: 3 * 86400 });
+    if (gone) await kv.put(`p:subs:${tripId}`, JSON.stringify(subs));
+  }
+  return { sent };
+}
+
 // ---------- handler ----------
 
 /**
@@ -110,7 +311,7 @@ function makeHandler(opts = {}) {
     const allowedOrigin = origin === cfg.ALLOWED_ORIGIN;
     const cors = allowedOrigin ? {
       'access-control-allow-origin': origin,
-      'access-control-allow-methods': 'POST, OPTIONS',
+      'access-control-allow-methods': 'GET, POST, OPTIONS',
       'access-control-allow-headers': request.headers.get('access-control-request-headers') || 'authorization, content-type, anthropic-version, anthropic-beta, x-trip-id',
       'access-control-expose-headers': 'request-id',
       'access-control-max-age': '86400',
@@ -120,8 +321,13 @@ function makeHandler(opts = {}) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
 
     const url = new URL(request.url);
-    if (request.method !== 'POST' || url.pathname !== '/v1/messages') return errorResponse(404, 'not_found_error', 'not found', cors);
-    if (!env.ANTHROPIC_API_KEY) return errorResponse(500, 'api_error', 'the server has no Anthropic key yet (add the ANTHROPIC_API_KEY secret)', cors);
+    const isPush = url.pathname.startsWith('/push/');
+    if (isPush) {
+      if (!env.USAGE) return errorResponse(500, 'api_error', 'reminders need the USAGE KV binding on the server', cors);
+      if (request.method === 'GET' && url.pathname === '/push/key') return jsonResponse({ key: (await vapidKeys(env.USAGE)).publicKey }, cors);
+    }
+    if (request.method !== 'POST' || !(isPush || url.pathname === '/v1/messages')) return errorResponse(404, 'not_found_error', 'not found', cors);
+    if (!isPush && !env.ANTHROPIC_API_KEY) return errorResponse(500, 'api_error', 'the server has no Anthropic key yet (add the ANTHROPIC_API_KEY secret)', cors);
 
     // 1. Who is asking?
     const auth = request.headers.get('authorization') || '';
@@ -133,8 +339,8 @@ function makeHandler(opts = {}) {
 
     // 2. Are they on this trip?
     const tripId = request.headers.get('x-trip-id') || '';
-    if (!TRIP_ID.test(tripId)) return errorResponse(403, 'permission_error', 'AI features work on shared trips only', cors);
-    const access = cfg.ACCESS === 'admins' ? 'admins' : 'everyone';
+    if (!TRIP_ID.test(tripId)) return errorResponse(403, 'permission_error', isPush ? 'reminders work on shared trips only' : 'AI features work on shared trips only', cors);
+    const access = cfg.ACCESS === 'admins' && !isPush ? 'admins' : 'everyone';
     const mk = `${uid}:${tripId}:${access}`;
     if (!(members.get(mk) > Date.now())) {
       const path = access === 'admins' ? `trips/${tripId}/admins/${uid}` : `trips/${tripId}`;
@@ -146,6 +352,15 @@ function makeHandler(opts = {}) {
           ? 'AI features are for trip admins only' : 'this phone is not on that trip', cors);
       }
       members.set(mk, Date.now() + 10 * 60 * 1000);
+    }
+
+    if (isPush) {
+      const raw = await request.text();
+      if (raw.length > 200000) return errorResponse(413, 'request_too_large', 'too much data', cors);
+      let body;
+      try { body = JSON.parse(raw); } catch { body = null; }
+      if (!body || typeof body !== 'object') return errorResponse(400, 'invalid_request_error', 'request body must be JSON', cors);
+      return handlePush(url.pathname, body, { kv: env.USAGE, tripId, cors, subject: cfg.PUSH_CONTACT || `${cfg.ALLOWED_ORIGIN}/`, fetchImpl });
     }
 
     // 3. Is it a request the app makes?
@@ -187,8 +402,9 @@ function makeHandler(opts = {}) {
 }
 
 const handler = makeHandler();
-// Only a default export with fetch, so the file can be pasted into the Cloudflare
+// Only a default export (fetch and the cron's scheduled), so the file can be pasted into the Cloudflare
 // editor as-is. (The repo's tests load the helpers with tests/worker-loader.mjs.)
 export default {
   fetch: (request, env) => handler(request, env),
+  scheduled: (event, env, ctx) => ctx.waitUntil(sendDue(env, { now: event.scheduledTime || Date.now() })),
 };

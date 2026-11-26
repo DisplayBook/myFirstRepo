@@ -207,6 +207,21 @@ The AI features normally need an Anthropic key on each phone. Instead, a small f
 
 Also set a monthly spending limit in the Anthropic Console (Settings → Limits). Phones with their own key keep using it; device-only trips need a key on the phone.
 
+## Reminders (push notifications)
+
+Phones on a shared trip can get notifications: time to leave (from the drive time), 3 hours before a flight, online check-in, hotel check-out, car return and parking, payments due, packing, and a morning summary. Each phone picks its own in **Trip → Reminders**.
+
+How it works: whenever the plan changes, a phone on the trip works out the reminder list (using each place's time zone, looked up offline from its map location) and sends it to the trip server (the same Cloudflare Worker as the shared AI key). The worker keeps it in KV and a cron trigger sends whatever is due every 5 minutes, as standard Web Push (encrypted to each phone, signed with a key the worker makes for itself on first use). Only short reminder texts and times are stored, and only while some phone has reminders on.
+
+Setup, once the worker from "Shared AI key" is running:
+
+1. Paste the latest `workers/trip-ai/worker.js` into the worker (**Edit code**) and **Deploy**.
+2. Make sure the worker has the **KV binding `USAGE`** (step 5 above). Reminders need it.
+3. Worker **Settings → Trigger events → Add → Cron trigger**: `*/5 * * * *` (every 5 minutes). Save.
+4. On each phone: open the trip, **Trip → Reminders → Turn on reminders**, allow notifications, then **Send a test**.
+
+On iPhone, notifications only work when the app is added to the Home Screen (Safari → Share → Add to Home Screen) and opened from there (iOS 16.4 or later).
+
 ## Notes
 
 - Times are stored exactly as you type them (the local time on your ticket), with no time-zone conversion, so a 09:30 departure from London and an 11:20 arrival in New York both show as printed.

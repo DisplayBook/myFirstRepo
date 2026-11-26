@@ -1,7 +1,7 @@
 // Trip Planner service worker: offline cache for the app shell. Bump VERSION after changing files.
 // Trip data is not handled here: shared trips are cached by Firestore itself,
 // device-only trips live in localStorage.
-const VERSION = 'trips-v1.20.0';
+const VERSION = 'trips-v1.21.0';
 const SHELL = [
   './',
   './index.html',
@@ -17,6 +17,9 @@ const SHELL = [
   './js/ai.js',
   './js/chat.js',
   './js/packing.js',
+  './js/reminders.js',
+  './js/notify.js',
+  './vendor/tz-lookup/tz.js',
   './vendor/anthropic/anthropic-sdk.js',
   './js/config.js',
   './vendor/leaflet/leaflet.js',
@@ -80,4 +83,34 @@ self.addEventListener('fetch', (event) => {
       return res;
     }).catch(() => caches.open(VERSION).then((c) => c.match(req, { ignoreSearch: true })).then((r) => r || caches.match('./index.html'))),
   );
+});
+
+// ---------- reminders (push notifications from the trip server) ----------
+
+self.addEventListener('push', (event) => {
+  let msg = {};
+  try { msg = event.data ? event.data.json() : {}; } catch { msg = { body: event.data?.text() || '' }; }
+  event.waitUntil(self.registration.showNotification(msg.title || 'Trip reminder', {
+    body: msg.body || '',
+    tag: msg.tag || undefined,
+    icon: './icons/icon-192.png',
+    badge: './icons/icon-192.png',
+    data: { url: msg.url || '#/today' },
+  }));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const hash = String(event.notification.data?.url || '#/today');
+  const url = new URL(hash, self.registration.scope).href;
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const win = wins.find((w) => w.url.startsWith(self.registration.scope)) || wins[0];
+    if (win) {
+      await win.focus();
+      win.postMessage({ type: 'open', hash });
+      return;
+    }
+    await self.clients.openWindow(url);
+  })());
 });
