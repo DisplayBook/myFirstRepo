@@ -17,4 +17,4 @@ export const firebaseConfig = {
 // The trip's AI server (workers/trip-ai, a Cloudflare Worker that holds the
 // Anthropic key so every phone on a shared trip can use the AI features).
 // Leave as null until it's set up; phones can still add their own key.
-export const aiProxyUrl = null;
+export const aiProxyUrl = 'https://trip-ai.ybk9dngrdm.workers.dev';
