@@ -526,3 +526,20 @@ test('flight lookup: results become form fields', () => {
   assert.deepEqual(normalizeFlightLookup({ ...raw, found: false }, '2026-12-05'), {});
   assert.deepEqual(normalizeFlightLookup(null, '2026-12-05'), {});
 });
+
+test('flight lookup: a far-ahead date uses the usual schedule on the requested date', () => {
+  const usual = {
+    found: true, basis: 'regular_schedule', airline: 'Lufthansa', flightNumber: 'LH 2485',
+    from: { name: 'Munich (MUC)', search: 'Munich Airport', terminal: '2', time: '21:40', date: '2026-11-24' },
+    to: { name: 'London Heathrow (LHR)', search: 'Heathrow Airport', terminal: '2', time: '22:45', date: '2026-11-24' },
+    aircraft: '', note: '', source: 'FlightAware',
+  };
+  const out = normalizeFlightLookup(usual, '2027-08-21');
+  assert.equal(out.start, '2027-08-21T21:40', 'recent date is replaced by the requested one');
+  assert.equal(out.end, '2027-08-21T22:45');
+  assert.equal(out.usualSchedule, true);
+  // Overnight usual flights keep their next-day arrival.
+  const night = normalizeFlightLookup({ ...usual, from: { ...usual.from, time: '22:30' }, to: { ...usual.to, time: '06:10', date: '2026-11-25' } }, '2027-08-21');
+  assert.equal(night.end, '2027-08-22T06:10');
+  assert.equal(normalizeFlightLookup({ ...usual, basis: 'exact_date', from: { ...usual.from, date: '2027-08-21' }, to: { ...usual.to, date: '2027-08-21' } }, '2027-08-21').usualSchedule, undefined);
+});
