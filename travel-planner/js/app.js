@@ -494,7 +494,25 @@ function renderToday(arg) {
     ${ag.tonight ? `<p class="tonight">🌙 Tonight: <strong>${esc(ag.tonight.title)}</strong>${ag.tonight.place?.name ? ` · ${esc(shortName(ag.tonight.place))}` : ''}</p>` : ''}
     <p class="hint muted">Drive times are estimates without live traffic, plus ${bufferPct()}% buffer (change in Trip).</p>
     <section class="card brief" id="brief" data-day="${esc(day)}">${briefHtml(day)}</section>`;
+  centerDayStrip($('.daystrip', main));
   fillLegs(legs, main);
+}
+
+/** Keep the selected day in view in the day strip (centred), and let a mouse wheel scroll it sideways. */
+function centerDayStrip(strip) {
+  if (!strip) return;
+  const sel = $('a.sel', strip);
+  if (sel) {
+    const offset = sel.getBoundingClientRect().left - strip.getBoundingClientRect().left;
+    strip.scrollLeft = Math.max(0, strip.scrollLeft + offset - (strip.clientWidth - sel.offsetWidth) / 2);
+  }
+  strip.addEventListener('wheel', (e) => {
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX) || strip.scrollWidth <= strip.clientWidth) return;
+    const max = strip.scrollWidth - strip.clientWidth;
+    if ((e.deltaY < 0 && strip.scrollLeft <= 0) || (e.deltaY > 0 && strip.scrollLeft >= max)) return; // let the page scroll at the ends
+    e.preventDefault();
+    strip.scrollLeft += e.deltaY;
+  }, { passive: false });
 }
 
 // ---------- live checks & day summary (Claude + web search) ----------
