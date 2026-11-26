@@ -15,7 +15,8 @@ import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendl
 import { SHARED, PACK_CATEGORIES, TEMPLATES, categoryLabel, splitPacking, expandItems, templateItems, progress as packProgress, groupByCategory, resolveWho, packingTripContext } from './packing.js';
 import { REMINDER_KINDS, ALL_KINDS, buildReminders, remindersHash } from './reminders.js';
 import * as notify from './notify.js';
-import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea } from './chat.js';
+import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea, VOICE_NOTE, speakableText } from './chat.js';
+import * as voice from './voice.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -1336,6 +1337,7 @@ function renderTripSettings() {
           <label>Time format<select name="h12"><option value="0">24-hour</option><option value="1" ${S.settings.h12 ? 'selected' : ''}>12-hour</option></select></label>
           <label>Distances<select name="unit"><option value="km">km</option><option value="mi" ${S.settings.unit === 'mi' ? 'selected' : ''}>miles</option></select></label>
           <label>Directions open in<select name="maps"><option value="google">Google Maps</option><option value="apple" ${S.settings.maps === 'apple' ? 'selected' : ''}>Apple Maps</option></select></label>
+          <label>Answers to 🎤 questions<select name="voiceReplies"><option value="1">Read aloud</option><option value="0" ${S.settings.voiceReplies === false ? 'selected' : ''}>Text only</option></select></label>
         </div>
       </form>
     </section>
@@ -1411,7 +1413,7 @@ function renderTripSettings() {
   if (aiOff) aiOff.onclick = () => { S.settings = store.setSettings({ aiKey: '' }); toast('Key removed from this device'); render(); };
   $('#prefs').onchange = (e) => {
     const fd = new FormData(e.currentTarget);
-    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps') });
+    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps'), voiceReplies: fd.get('voiceReplies') !== '0' });
   };
   if (cloud) {
     let code = '';
@@ -1659,7 +1661,7 @@ function closeSheet() { if (sheet.open) sheet.close(); }
 sheet.addEventListener('click', (e) => {
   if (e.target === sheet || e.target.closest('[data-close]')) closeSheet();
 });
-sheet.addEventListener('close', () => { sheetBody.innerHTML = ''; S.onFiles = null; chatAbort?.abort(); chatAbort = null; });
+sheet.addEventListener('close', () => { sheetBody.innerHTML = ''; S.onFiles = null; chatAbort?.abort(); chatAbort = null; chatVoiceOff(); });
 
 $('#fab').onclick = () => openAddChooser();
 
@@ -2292,6 +2294,20 @@ function flightLookupHtml(draft, existing, lookup) {
 // ---------- trip chat ----------
 
 let chatAbort = null;
+let chatListening = null; // the open microphone, if any
+function chatVoiceOff() {
+  chatListening?.stop();
+  chatListening = null;
+  voice.stopSpeaking();
+}
+const VOICE_ERRORS = {
+  'not-allowed': 'Microphone access is off for this app. Allow it in your phone\'s Settings, or tap the 🎤 on your keyboard to dictate.',
+  'service-not-allowed': 'Voice questions aren\'t available in this app on this phone. Tap the 🎤 on your keyboard to dictate instead.',
+  unsupported: 'Voice questions aren\'t available in this browser. Tap the 🎤 on your keyboard to dictate instead.',
+  'audio-capture': 'No microphone was found.',
+  network: 'Voice questions need an internet connection.',
+  'no-speech': 'Didn\'t catch that. Tap 🎤 and try again.',
+};
 const chatKey = () => `tp:chat:${S.trip?.id}`;
 function chatLoad() { try { return JSON.parse(localStorage.getItem(chatKey())) || []; } catch { return []; } }
 function chatSave(msgs) { try { localStorage.setItem(chatKey(), JSON.stringify(msgs.slice(-40))); } catch { /* full */ } }
@@ -2328,8 +2344,9 @@ function chatBubble(m, mi) {
         <span class="idea-actions"><a class="small" href="${esc(mapSearchUrl(p.address ? `${p.name}, ${p.address}` : p.name))}" target="_blank" rel="noopener">Map</a>
         ${canEdit() ? `${isSavedIdea(ideasList(), p.name) ? '<span class="small saved">✓ In Ideas</span>' : `<button type="button" class="link small" data-chat-save="${mi}:${pi}">☆ Save idea</button>`}
         <button type="button" class="link small" data-chat-plan="${mi}:${pi}">＋ Add to plan</button>` : ''}</span></span></div>`).join('')}</div>` : '';
+  const read = !m.error && voice.canSpeak() ? `<button type="button" class="link small read-aloud" data-chat-speak="${mi}" aria-label="Read this answer aloud">🔊 Read aloud</button>` : '';
   return `<li class="msg bot"><div class="bubble">${m.error ? `<p class="error">${esc(m.text)}</p>` : renderMarkdown(m.text)}
-    ${places}
+    ${places}${read}
     ${(m.sources || []).length ? `<div class="sources"><span class="muted small">Sources:</span> ${m.sources.map((x) => `<a class="small" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>`).join(' · ')}</div>` : ''}</div></li>`;
 }
 
@@ -2344,12 +2361,14 @@ function openChat() {
   }
   openSheet(`<div class="chat">
     <div class="sheet-head"><h2>💬 Ask about this trip</h2>
-      <span class="row"><button type="button" class="link small" id="chat-new">New chat</button>
+      <span class="row"><button type="button" class="link small" id="chat-stop" hidden>■ Stop reading</button>
+      <button type="button" class="link small" id="chat-new">New chat</button>
       <button type="button" class="iconbtn" data-close aria-label="Close">✕</button></span></div>
     <ol class="chat-log" id="chat-log" aria-live="polite"></ol>
     <div class="chat-starters" id="chat-starters"></div>
     <form class="chat-input" id="chat-form">
       <textarea id="chat-q" rows="1" enterkeyhint="send" placeholder="Ask about your trip…" aria-label="Your question"></textarea>
+      <button type="button" class="iconbtn mic" id="chat-mic" aria-label="Ask by voice" aria-pressed="false">🎤</button>
       <button class="btn" id="chat-send" aria-label="Send">Send</button>
     </form>
     <p class="muted small chat-note">Answers use your trip details and the web, and can be wrong. Check anything important.</p>
@@ -2357,6 +2376,45 @@ function openChat() {
   sheetBody.classList.add('chat-mode');
   const log = $('#chat-log');
   const q = $('#chat-q');
+  const mic = $('#chat-mic');
+  const stopBtn = $('#chat-stop');
+  const PLACEHOLDER = q.placeholder;
+  const say = (text) => {
+    stopBtn.hidden = false;
+    voice.speak(speakableText(text), { onEnd: () => { if (stopBtn.isConnected) stopBtn.hidden = true; } });
+  };
+  stopBtn.onclick = () => { voice.stopSpeaking(); stopBtn.hidden = true; };
+  const micState = (on) => {
+    mic.classList.toggle('on', on);
+    mic.setAttribute('aria-pressed', String(on));
+    mic.setAttribute('aria-label', on ? 'Stop listening' : 'Ask by voice');
+    q.placeholder = on ? 'Listening… ask your question' : PLACEHOLDER;
+  };
+  mic.onclick = () => {
+    if (chatListening) { chatListening.stop(); return; }
+    if (chatAbort) return;
+    if (!voice.canListen()) { toast(VOICE_ERRORS.unsupported); q.focus(); return; }
+    voice.stopSpeaking(); stopBtn.hidden = true;
+    voice.unlockSpeech();
+    q.value = '';
+    micState(true);
+    chatListening = voice.listen({
+      onText: (t) => { q.value = t; },
+      onEnd: (t) => {
+        chatListening = null;
+        if (!mic.isConnected) return;
+        micState(false);
+        if (t.trim()) send(t, { spoken: true }); else toast(VOICE_ERRORS['no-speech']);
+      },
+      onError: (code) => {
+        chatListening = null;
+        if (!mic.isConnected) return;
+        micState(false);
+        if (code !== 'aborted') toast(VOICE_ERRORS[code] || 'Voice input stopped. Try again, or type your question.');
+        if (code === 'not-allowed' || code === 'service-not-allowed') q.focus();
+      },
+    });
+  };
   const draw = () => {
     const msgs = chatLoad();
     log.innerHTML = msgs.map((m, i) => chatBubble(m, i)).join('');
@@ -2366,6 +2424,12 @@ function openChat() {
   draw();
   $('#chat-new').onclick = () => { chatAbort?.abort(); chatSave([]); draw(); q.focus(); };
   // Place cards: save to Ideas, or add to the plan (then come back to the chat).
+  log.addEventListener('click', (e) => {
+    const r = e.target.closest('[data-chat-speak]');
+    if (!r) return;
+    const m = chatLoad()[Number(r.dataset.chatSpeak)];
+    if (m?.text) say(m.text);
+  });
   log.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-chat-save], [data-chat-plan]');
     if (!b) return;
@@ -2385,7 +2449,7 @@ function openChat() {
   q.addEventListener('input', () => { q.style.height = 'auto'; q.style.height = `${Math.min(q.scrollHeight, 140)}px`; });
   $('#chat-form').onsubmit = (e) => { e.preventDefault(); send(q.value); };
 
-  async function send(text) {
+  async function send(text, { spoken = false } = {}) {
     text = String(text || '').trim();
     if (!text || chatAbort) return;
     const tripId = S.trip.id;
@@ -2406,16 +2470,15 @@ function openChat() {
         system: CHAT_SYSTEM,
         context: buildTripContext({ meta: S.meta, items: S.items, files: S.files, now: localDateTime(), live: liveNotes(), packing: S.packing }),
         history: before.filter((m) => !m.error).slice(-20).map((m) => ({ role: m.role, text: m.text })),
-        question: text,
+        question: spoken ? `${text}${VOICE_NOTE}` : text,
         signal: chatAbort.signal,
         onText: (t) => { if (li.isConnected) { $('.bubble', li).innerHTML = renderMarkdown(t); log.scrollTop = log.scrollHeight; } },
       });
       if (S.trip?.id !== tripId) return;
       const places = placesFrom(content);
-      chatSave([...msgs, {
-        role: 'assistant', text: answerText(content) || (places.length ? 'Here are some ideas:' : 'Sorry, I don\'t have an answer for that.'),
-        sources: sourcesFrom(content), places, at: Date.now(),
-      }]);
+      const answer = answerText(content) || (places.length ? 'Here are some ideas:' : 'Sorry, I don\'t have an answer for that.');
+      chatSave([...msgs, { role: 'assistant', text: answer, sources: sourcesFrom(content), places, at: Date.now(), spoken }]);
+      if (spoken && S.settings.voiceReplies !== false && log.isConnected) say(answer);
     } catch (err) {
       if (err?.name === 'AbortError' || chatAbort?.signal.aborted) return;
       if (S.trip?.id === tripId) chatSave([...msgs, { role: 'assistant', text: friendlyError(err), error: true, at: Date.now() }]);
