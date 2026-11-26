@@ -1587,10 +1587,18 @@ function openItemForm(type, existing, prefill = {}, { docs: prefillDocs = [], on
         status.textContent = 'Finding the airports on the map…';
         for (const k of ['from', 'to']) {
           if (!found[k]) continue;
-          try {
-            const [hit] = await searchPlaces(found[k].search || found[k].name);
-            found[k] = hit ? { name: found[k].name, lat: hit.lat, lon: hit.lon } : { name: found[k].name };
-          } catch { found[k] = { name: found[k].name }; }
+          const { name, search } = found[k];
+          // Try the full search text, then simpler forms: "Munich Airport", "MUC airport".
+          const code = (name.match(/\(([A-Z]{3})\)/) || [])[1];
+          const plain = name.replace(/\s*\([^)]*\)\s*/g, ' ').trim();
+          const tries = [search, name, /airport/i.test(plain) ? plain : `${plain} Airport`, code && `${code} airport`].filter(Boolean);
+          found[k] = { name };
+          for (const q of [...new Set(tries)]) {
+            try {
+              const [hit] = await searchPlaces(q);
+              if (hit) { found[k] = { name, lat: hit.lat, lon: hit.lon }; break; }
+            } catch { break; }
+          }
         }
         readInputs();
         const keep = Object.fromEntries(Object.entries(draft).filter(([k]) => !['type', 'id'].includes(k)));
