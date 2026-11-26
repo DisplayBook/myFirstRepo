@@ -92,7 +92,7 @@ async function main() {
       Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
         speaking: false, pending: false, paused: false,
         // Silent utterances (the tap-to-unlock) aren't heard, so aren't recorded.
-        speak(u) { if (u.text.trim() && u.volume !== 0) window.__spoken.push(u.text); setTimeout(() => u.onend?.(), 30); }, cancel() {}, getVoices() { return []; },
+        speak(u) { if (u.text.trim() && u.volume !== 0) window.__spoken.push(u.text); setTimeout(() => { u.onstart?.(); u.onend?.(); }, 30); }, cancel() {}, getVoices() { return []; },
       } });
     });
     const page = await context.newPage();
@@ -687,6 +687,13 @@ async function main() {
       await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
       await page.goto(`${BASE}#/trip`);
       await page.getByLabel('Answers to 🎤 questions').selectOption('1');
+      // Voice check: plays a sentence and shows what the phone reports.
+      await page.getByText('🔊 Test voice').click();
+      await page.evaluate(() => { window.__spoken = []; });
+      await page.getByRole('button', { name: 'Test (simple)' }).click();
+      await page.locator('#voice-log li', { hasText: 'Started speaking' }).waitFor();
+      await page.locator('#voice-log li', { hasText: 'Finished' }).waitFor();
+      assert.deepEqual(await page.evaluate(() => window.__spoken), ['This is a voice test from your trip planner.']);
     });
 
     await check('add a flight from just the flight number and date', async () => {
