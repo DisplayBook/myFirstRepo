@@ -409,6 +409,28 @@ async function main() {
       await viewer.locator('.msg.bot').first().getByRole('button', { name: 'Read this answer aloud' }).click();
       await viewer.getByRole('button', { name: '▶ Play answer' }).click();
       await viewer.waitForFunction(() => window.__played.includes('blob'));
+      await viewer.locator('#chat-stop').waitFor({ state: 'hidden' });
+      await viewer.locator('#sheet').getByRole('button', { name: 'Close' }).click();
+
+      // A long answer is read in pieces, one after another, so it starts quickly.
+      await viewer.evaluate(() => {
+        const key = Object.keys(localStorage).find((k) => k.startsWith('tp:chat:'));
+        const msgs = JSON.parse(localStorage.getItem(key));
+        const long = Array.from({ length: 8 }, (_, i) => `Sentence number ${i + 1} tells you something useful about the Colosseum, the Forum and the best time to visit.`).join(' ');
+        msgs.push({ role: 'user', text: 'Tell me everything' }, { role: 'assistant', text: long });
+        localStorage.setItem(key, JSON.stringify(msgs));
+        window.__played = [];
+      });
+      await viewer.getByRole('button', { name: 'Ask about this trip' }).click();
+      const n0 = speechCalls.length;
+      await viewer.locator('.msg.bot').last().getByRole('button', { name: 'Read this answer aloud' }).click();
+      await viewer.locator('#chat-stop').waitFor({ state: 'hidden', timeout: 15000 });
+      const pieces = speechCalls.slice(n0).map((c) => c.inputs.text);
+      assert.ok(pieces.length >= 3, `read in ${pieces.length} pieces`);
+      assert.ok(pieces.every((t) => t.length <= 320));
+      assert.match(pieces[0], /^Sentence number 1 /);
+      assert.match(pieces.at(-1), /Sentence number 8 /);
+      assert.equal(await viewer.evaluate(() => window.__played.filter((x) => x === 'blob').length), pieces.length, 'each piece played');
       await viewer.locator('#sheet').getByRole('button', { name: 'Close' }).click();
 
       // A server without voice set up says so.

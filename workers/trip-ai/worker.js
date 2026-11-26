@@ -30,7 +30,7 @@ const DEFAULTS = {
   ALLOWED_ORIGIN: 'https://displaybook.github.io',
   ACCESS: 'everyone',
   DAILY_LIMIT: '40',
-  SPEECH_DAILY_LIMIT: '150',
+  SPEECH_DAILY_LIMIT: '400',
 };
 const ALLOWED_MODELS = ['claude-opus-5-5'];
 const MAX_TOKENS = 16000;
