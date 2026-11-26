@@ -554,3 +554,49 @@ test('drive legs: never across a flight, even if the airport has no map position
   const legs = driveLegs(dayAgenda(its, '2027-08-21'));
   assert.equal(legs.filter((l) => l.from === lhr && l.to.name === 'Munich International Airport').length, 0, 'no London → Munich drive');
 });
+
+// ---------- packing ----------
+import { SHARED, PACK_CATEGORIES, TEMPLATES, splitPacking, expandItems, templateItems, progress as packProgress, groupByCategory, resolveWho } from '../../travel-planner/js/packing.js';
+import { PACKING_TOOL } from '../../travel-planner/js/ai.js';
+
+test('packing: items for each person, shared, or one person; duplicates skipped', () => {
+  const people = [{ id: 'p1', kind: 'person', name: 'Alex', at: '1' }, { id: 'p2', kind: 'person', name: 'Sam', at: '2' }];
+  const each = expandItems([{ name: 'Ski socks', category: 'clothes', who: 'each', qty: 3 }], people);
+  assert.deepEqual(each.map((i) => [i.who, i.name, i.qty, i.done]), [['p1', 'Ski socks', 3, false], ['p2', 'Ski socks', 3, false]]);
+  const existing = [{ kind: 'item', who: 'p1', name: 'ski SOCKS' }];
+  assert.deepEqual(expandItems([{ name: 'Ski socks ', category: 'clothes', who: 'each' }], people, existing).map((i) => i.who), ['p2'], 'p1 already has them');
+  assert.equal(expandItems([{ name: 'Sun cream', category: 'nope', who: SHARED, qty: 0 }], people)[0].category, 'other');
+  assert.equal(expandItems([{ name: 'Sun cream', who: SHARED, qty: 0 }], people)[0].qty, 1);
+  assert.deepEqual(expandItems([{ name: 'Gloves', who: 'each' }], []).map((i) => i.who), [SHARED], 'no people yet: shared');
+  assert.deepEqual(expandItems([{ name: '  ', who: 'each' }], people), []);
+});
+
+test('packing: progress, grouping, who-matching, templates and tool', () => {
+  const items = [
+    { kind: 'item', who: 'p1', name: 'Helmet', category: 'gear', done: true },
+    { kind: 'item', who: 'p1', name: 'Gloves', category: 'clothes', done: false },
+    { kind: 'item', who: SHARED, name: 'Adapter', category: 'electronics', done: false },
+    { kind: 'item', who: 'p1', name: 'Beanie', category: 'clothes', done: true },
+  ];
+  assert.deepEqual(packProgress(items), { done: 2, total: 4 });
+  assert.deepEqual(packProgress(items, 'p1'), { done: 2, total: 3 });
+  const g = groupByCategory(items);
+  assert.deepEqual(g.map((x) => x.key), ['clothes', 'gear', 'electronics'], 'category order');
+  assert.deepEqual(g[0].items.map((i) => i.name), ['Gloves', 'Beanie'], 'unpacked first');
+  assert.deepEqual(splitPacking([{ kind: 'person', name: 'B', at: '2' }, { kind: 'item' }, { kind: 'person', name: 'A', at: '1' }]).people.map((p) => p.name), ['A', 'B']);
+  const people = [{ id: 'p1', name: 'Alex Smith' }, { id: 'p2', name: 'Sam' }];
+  assert.equal(resolveWho('Alex', people), 'p1');
+  assert.equal(resolveWho('sam', people), 'p2');
+  assert.equal(resolveWho('each', people), 'each');
+  assert.equal(resolveWho('shared', people), SHARED);
+  assert.equal(resolveWho('Nobody', people), SHARED);
+  const cats = PACK_CATEGORIES.map(([k]) => k);
+  for (const [key, t] of Object.entries(TEMPLATES)) {
+    assert.ok(templateItems(key).length >= 8, key);
+    for (const [name, cat, who] of t.items) assert.ok(cats.includes(cat) && ['each', 'shared'].includes(who), `${key}: ${name}`);
+  }
+  assert.equal(PACKING_TOOL.strict, true);
+  assert.match(PACKING_TOOL.name, /^report_[a-z_]+$/);
+  const ctx = buildTripContext({ meta: {}, items: [], packing: [{ kind: 'person', id: 'p1', name: 'Alex' }, ...items] });
+  assert.match(ctx, /Alex: 2\/3 packed; still to pack: Gloves/);
+});

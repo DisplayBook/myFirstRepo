@@ -41,7 +41,7 @@ function bookingLine(it, home) {
  * Everything the chat should know about the trip, as plain text.
  * live: optional map itemId -> short text (e.g. latest flight status).
  */
-export function buildTripContext({ meta = {}, items = [], files = [], now = '', live = {} }) {
+export function buildTripContext({ meta = {}, items = [], files = [], now = '', live = {}, packing = [] }) {
   const home = homeCurrency(meta);
   const span = tripSpan(meta, items);
   const days = dateRange(span.start, span.end);
@@ -85,6 +85,20 @@ export function buildTripContext({ meta = {}, items = [], files = [], now = '', 
   out.push('', '## Saved ideas (not in the plan yet)');
   if (!ideas.length) out.push('(none)');
   for (const i of ideas.slice(0, 40)) out.push(`- ${i.name}${i.category ? ` [${i.category}]` : ''}${i.address ? `, ${i.address}` : ''}${i.why ? ` — ${i.why}` : ''}`);
+
+  const people = packing.filter((e) => e.kind === 'person');
+  const packItems = packing.filter((e) => e.kind === 'item');
+  if (people.length || packItems.length) {
+    out.push('', '## Packing list');
+    if (people.length) out.push(`People on the trip: ${people.map((p) => p.name).join(', ')}`);
+    const whoName = (id) => (id === 'shared' ? 'Shared' : people.find((p) => p.id === id)?.name || 'Someone');
+    for (const id of ['shared', ...people.map((p) => p.id)]) {
+      const list = packItems.filter((i) => i.who === id);
+      if (!list.length) continue;
+      const left = list.filter((i) => !i.done);
+      out.push(`- ${whoName(id)}: ${list.length - left.length}/${list.length} packed${left.length ? `; still to pack: ${left.slice(0, 40).map((i) => `${i.name}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ')}` : ''}`);
+    }
+  }
 
   const docs = files.filter((f) => f.text);
   if (files.length) {

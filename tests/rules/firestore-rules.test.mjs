@@ -132,3 +132,21 @@ test('item and file validation still applies to admins', async () => {
   await assertFails(setDoc(doc(a, 'trips', TRIP, 'files', 'f2', 'chunks', '0'), { i: 0, b: 'not bytes' }));
   await assertFails(setDoc(doc(a, 'trips', TRIP), { name: 'x', owner: 'bob' }), 'owner cannot change');
 });
+
+test('packing lists: anyone on the trip can add, tick and remove; nothing else', async () => {
+  await createTrip('alice');
+  const v = db('viewer');
+  const ref = doc(v, 'trips', TRIP, 'packing', 'pk1');
+  await assertSucceeds(setDoc(ref, { kind: 'item', name: 'Ski socks', who: 'shared', category: 'clothes', qty: 3, done: false, at: 'now', by: 'Viewer' }));
+  await assertSucceeds(setDoc(ref, { kind: 'item', name: 'Ski socks', who: 'shared', category: 'clothes', qty: 3, done: true, at: 'now', by: 'Viewer' }));
+  await assertSucceeds(setDoc(doc(v, 'trips', TRIP, 'packing', 'pp1'), { kind: 'person', name: 'Sam', at: 'now' }));
+  await assertSucceeds(getDocs(collection(db('alice'), 'trips', TRIP, 'packing')));
+  await assertSucceeds(deleteDoc(ref));
+  await assertFails(setDoc(doc(v, 'trips', TRIP, 'packing', 'bad1'), { kind: 'item', name: 'x', evil: true }), 'unknown fields');
+  await assertFails(setDoc(doc(v, 'trips', TRIP, 'packing', 'bad2'), { kind: 'secret', name: 'x' }), 'unknown kind');
+  await assertFails(setDoc(doc(v, 'trips', TRIP, 'packing', 'bad3'), { kind: 'item', name: '' }), 'empty name');
+  await assertFails(setDoc(doc(v, 'trips', TRIP, 'packing', 'bad4'), { kind: 'item', name: 'x'.repeat(121) }), 'too long');
+  await assertFails(setDoc(doc(db(null), 'trips', TRIP, 'packing', 'bad5'), { kind: 'item', name: 'x' }), 'signed out');
+  // Viewers still can't touch bookings.
+  await assertFails(setDoc(doc(v, 'trips', TRIP, 'items', 'i9'), { type: 'flight', start: 'x' }));
+});
