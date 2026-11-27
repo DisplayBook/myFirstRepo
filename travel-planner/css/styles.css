@@ -546,3 +546,6 @@ body[data-view="map"] .fab { bottom: calc(var(--tabbar-h) + env(safe-area-inset-
 .todo-done-head .link { margin-left: auto; }
 .todo-due { display: grid; gap: 2px; margin: 10px 0; padding: 10px 14px; border-radius: 12px; background: var(--warn-bg); color: var(--text); text-decoration: none; }
 .ideas-card h2 .btn { margin-left: auto; }
+.idea-more { margin: 4px 0 8px; }
+.idea-more summary { cursor: pointer; color: var(--accent); }
+.idea-more label { margin-top: 8px; }
