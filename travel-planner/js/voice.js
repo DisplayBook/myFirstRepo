@@ -1,28 +1,11 @@
-// Voice for the trip chat: speak a question (the browser's speech recognition)
-// and hear the answer (speech synthesis). Both are built into the phone; no
-// audio is sent anywhere by this app.
+// Voice questions for the trip chat: the phone's own speech recognition turns
+// what you say into text. No audio is sent anywhere by this app.
 
 const Recognition = () => window.SpeechRecognition || window.webkitSpeechRecognition || null;
 
 export const canListen = () => !!Recognition();
-export const canSpeak = () => 'speechSynthesis' in window && typeof window.SpeechSynthesisUtterance === 'function';
-
-const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const standalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
-/** The phone's own voice gets stuck silently in iPhone Home Screen apps. */
-export const phoneVoiceWorks = () => canSpeak() && !(isIOS() && standalone());
 
 const lang = () => navigator.language || 'en-GB';
-
-/**
- * iPhone audio mode (Safari 16.4+). While the microphone is in use the phone is
- * in "record" mode, which plays any sound quietly through the earpiece and
- * shows the microphone icon. Switching to "playback" before speaking sends it
- * to the loudspeaker.
- */
-function audioMode(type) {
-  try { if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type; } catch { /* not supported */ }
-}
 
 /**
  * Listen for one question. Calls onText(text, final) as words come in and
@@ -39,7 +22,6 @@ export function listen({ onText, onEnd, onError } = {}) {
   rec.maxAlternatives = 1;
   let text = '';
   let failed = false;
-  audioMode('play-and-record');
   // Make sure the microphone is let go once listening ends.
   let released = false;
   const release = () => {
@@ -47,7 +29,6 @@ export function listen({ onText, onEnd, onError } = {}) {
     released = true;
     rec.onend = null;
     try { rec.abort(); } catch { /* already stopped */ }
-    audioMode('playback');
   };
   rec.onresult = (e) => {
     let interim = '';
@@ -63,189 +44,4 @@ export function listen({ onText, onEnd, onError } = {}) {
   rec.onend = () => { const ok = !failed; release(); if (ok) onEnd?.(text); };
   try { rec.start(); } catch { failed = true; onError?.('busy'); }
   return { stop() { try { rec.stop(); } catch { /* already stopped */ } } };
-}
-
-/**
- * iPhones only play speech that a tap started. Speaking something real (but
- * silent) during the tap unlocks speech for the answer that arrives later;
- * an empty or blank utterance is ignored and doesn't count.
- */
-export function unlockSpeech() {
-  if (!canSpeak()) return;
-  audioMode('playback');
-  try {
-    const u = new SpeechSynthesisUtterance('.');
-    u.volume = 0;
-    u.rate = 2;
-    keep.add(u);
-    u.onend = () => keep.delete(u);
-    u.onerror = () => keep.delete(u);
-    window.speechSynthesis.speak(u);
-  } catch { /* ignore */ }
-}
-
-// Safari can drop an utterance (and never finish it) if nothing references it.
-const keep = new Set();
-
-function bestVoice() {
-  const voices = window.speechSynthesis.getVoices?.() || [];
-  const l = lang().toLowerCase().replace('_', '-');
-  const base = l.split('-')[0];
-  const ok = (v) => v.lang?.toLowerCase().replace('_', '-');
-  return voices.find((v) => ok(v) === l && v.localService)
-    || voices.find((v) => ok(v) === l)
-    || voices.find((v) => ok(v)?.startsWith(base) && v.localService)
-    || voices.find((v) => ok(v)?.startsWith(base)) || null;
-}
-
-/** Split into sentence-sized pieces (long utterances stop early on some phones). */
-export function speechChunks(text, max = 220) {
-  const parts = String(text).match(/[^.!?]+[.!?]+["')\]]*\s*|[^.!?]+$/g) || [];
-  const out = [];
-  let cur = '';
-  for (const p of parts) {
-    if ((cur + p).length > max && cur) { out.push(cur.trim()); cur = ''; }
-    if (p.length > max) { for (let i = 0; i < p.length; i += max) out.push(p.slice(i, i + max).trim()); continue; }
-    cur += p;
-  }
-  if (cur.trim()) out.push(cur.trim());
-  return out.filter(Boolean);
-}
-
-let session = 0;
-
-/** Read text aloud (stops anything already being read). onEnd when finished or stopped. */
-export function speak(text, { onEnd } = {}) {
-  const chunks = canSpeak() ? speechChunks(String(text || '').slice(0, 3000)) : [];
-  if (!chunks.length) { onEnd?.(); return; }
-  const synth = window.speechSynthesis;
-  audioMode('playback');
-  const id = ++session;
-  let done = false;
-  const finish = () => { if (!done) { done = true; onEnd?.(); } };
-  const start = () => {
-    if (id !== session) { finish(); return; }
-    if (synth.paused) synth.resume();
-    const voice = bestVoice();
-    chunks.forEach((c, i) => {
-      const u = new SpeechSynthesisUtterance(c);
-      u.lang = lang();
-      if (voice) u.voice = voice;
-      u.rate = 1;
-      keep.add(u);
-      const last = i === chunks.length - 1;
-      u.onend = () => { keep.delete(u); if (last) finish(); };
-      u.onerror = () => { keep.delete(u); finish(); };
-      synth.speak(u);
-    });
-  };
-  // On iPhone, speak() straight after cancel() is often dropped: only cancel
-  // when something is playing, then give it a moment.
-  if (synth.speaking || synth.pending) { synth.cancel(); setTimeout(start, 250); } else start();
-}
-
-export const isSpeaking = () => canSpeak() && !!(window.speechSynthesis.speaking || window.speechSynthesis.pending);
-
-export function stopSpeaking() {
-  session++;
-  stopAudio();
-  if (canSpeak()) window.speechSynthesis.cancel();
-}
-
-// ---------- natural voice: audio made by the trip server ----------
-// Played like any other sound, which iPhones allow in Home Screen apps too,
-// once a tap has started the (single, reused) audio player.
-
-let player = null;
-let playerDone = null;
-const audioEl = () => {
-  if (!player) { player = new Audio(); player.preload = 'auto'; player.setAttribute('playsinline', ''); }
-  return player;
-};
-
-let silence = '';
-/** A tiny silent WAV, to start the audio player during a tap. */
-function silentWav() {
-  if (silence) return silence;
-  const n = 400;
-  const b = new Uint8Array(44 + n);
-  const v = new DataView(b.buffer);
-  const w = (o, s) => { for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); };
-  w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVE'); w(12, 'fmt ');
-  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
-  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
-  w(36, 'data'); v.setUint32(40, n, true); b.fill(128, 44);
-  silence = `data:audio/wav;base64,${btoa(String.fromCharCode(...b))}`;
-  return silence;
-}
-
-/** Call in a tap, before fetching audio: lets the answer play when it arrives. */
-export function unlockAudio() {
-  audioMode('playback');
-  try {
-    const a = audioEl();
-    a.src = silentWav();
-    a.play()?.catch?.(() => {});
-  } catch { /* ignore */ }
-}
-
-/** Play MP3 audio (a Blob). Resolves when playback starts; onEnd when it finishes or stops. */
-export async function playAudio(blob, { onEnd } = {}) {
-  stopAudio();
-  audioMode('playback');
-  const a = audioEl();
-  const url = URL.createObjectURL(blob);
-  let done = false;
-  const finish = () => {
-    if (done) return;
-    done = true;
-    URL.revokeObjectURL(url);
-    if (playerDone === finish) playerDone = null;
-    onEnd?.();
-  };
-  playerDone = finish;
-  a.onended = finish;
-  a.onerror = finish;
-  a.src = url;
-  try { await a.play(); } catch (e) { finish(); throw e; }
-}
-
-export function stopAudio() {
-  if (!player) return;
-  try { player.pause(); } catch { /* ignore */ }
-  playerDone?.();
-}
-
-export const isPlaying = () => !!(player && !player.paused && !player.ended && playerDone);
-
-/**
- * Voice check for Trip → On this device: speaks a test sentence and reports
- * what the phone says is happening. `plain` skips the voice choice and audio
- * mode, to tell a phone problem from an app one. Must be called from a tap.
- */
-export function voiceTest({ plain = false, onLog } = {}) {
-  const log = (s) => onLog?.(s);
-  if (!canSpeak()) { log('❌ This browser has no speech (speechSynthesis missing).'); return; }
-  const synth = window.speechSynthesis;
-  const standalone = window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
-  log(`App: ${standalone ? 'Home Screen' : 'browser'} · language ${lang()} · audio mode ${navigator.audioSession ? navigator.audioSession.type : 'n/a'}`);
-  if (!plain) audioMode('playback');
-  if (synth.speaking || synth.pending) synth.cancel();
-  const u = new SpeechSynthesisUtterance('This is a voice test from your trip planner.');
-  if (!plain) {
-    u.lang = lang();
-    const v = bestVoice();
-    if (v) u.voice = v;
-    log(`Voice: ${v ? `${v.name} (${v.lang}${v.localService ? ', on phone' : ''})` : 'phone default'}`);
-  }
-  keep.add(u);
-  let started = false;
-  u.onstart = () => { started = true; log('▶️ Started speaking'); };
-  u.onend = () => { keep.delete(u); log(started ? '✅ Finished. Did you hear it?' : '⚠️ Ended without starting'); };
-  u.onerror = (e) => { keep.delete(u); log(`❌ Error: ${e.error || 'unknown'}`); };
-  synth.speak(u);
-  setTimeout(() => {
-    log(`Voices on this phone: ${synth.getVoices?.().length || 0}`);
-    if (!started) log('⚠️ Nothing started after 4 seconds: the phone did not begin speaking.');
-  }, 4000);
 }

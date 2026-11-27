@@ -75,6 +75,17 @@ service cloud.firestore {
           && request.resource.data.name.size() <= 120;
       }
 
+      match /todos/{todoId} {
+        allow read, delete: if canRead(tripId);
+        allow create, update: if canRead(tripId)
+          && todoId.size() <= 40
+          && request.resource.data.keys().hasOnly(['text', 'done', 'due', 'who', 'note', 'source', 'at', 'by', 'doneAt', 'doneBy'])
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 200
+          && (!('note' in request.resource.data) || (request.resource.data.note is string && request.resource.data.note.size() <= 500));
+      }
+
       match /items/{itemId} {
         allow read: if canRead(tripId);
         allow create, update: if isAdmin(tripId)

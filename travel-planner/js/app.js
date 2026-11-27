@@ -15,7 +15,8 @@ import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendl
 import { SHARED, PACK_CATEGORIES, TEMPLATES, categoryLabel, splitPacking, expandItems, templateItems, progress as packProgress, groupByCategory, resolveWho, packingTripContext } from './packing.js';
 import { REMINDER_KINDS, ALL_KINDS, buildReminders, remindersHash } from './reminders.js';
 import * as notify from './notify.js';
-import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea, VOICE_NOTE, speakableText } from './chat.js';
+import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, todosFrom, isSavedIdea } from './chat.js';
+import { sortTodos, todoProgress, dueInfo, hasTodo } from './todos.js';
 import * as voice from './voice.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -33,6 +34,7 @@ const S = {
   items: [],
   files: [], // attached documents (metadata only)
   packing: [], // packing list: people and items
+  todos: [], // to-do list
   role: 'admin', // 'admin' can edit; 'viewer' opened a view-only link
   exists: null,
   status: { state: 'idle' },
@@ -96,11 +98,11 @@ const prefetched = new Set();
 function openTrip(id, kind) {
   if (S.close) S.close();
   S.trip = { id, kind };
-  S.meta = {}; S.items = []; S.files = []; S.packing = []; S.exists = null; S.sig = ''; S.role = kind === 'cloud' ? 'viewer' : 'admin';
+  S.meta = {}; S.items = []; S.files = []; S.packing = []; S.todos = []; S.exists = null; S.sig = ''; S.role = kind === 'cloud' ? 'viewer' : 'admin';
   S.settings = store.setSettings({ currentTrip: id });
   S.close = store.backendFor(kind).open(id, (data) => {
     const roleChanged = S.role !== (data.role || 'admin');
-    S.meta = data.meta; S.items = data.items; S.files = data.files || []; S.packing = data.packing || []; S.exists = data.exists;
+    S.meta = data.meta; S.items = data.items; S.files = data.files || []; S.packing = data.packing || []; S.todos = data.todos || []; S.exists = data.exists;
     S.role = data.role || 'admin';
     S.onFiles?.();
     if (kind === 'cloud' && navigator.onLine && S.files.length && !prefetched.has(id)) {
@@ -108,7 +110,7 @@ function openTrip(id, kind) {
       setTimeout(() => store.backendFor('cloud').prefetch(id, S.files).catch(() => {}), 3000);
     }
     if (data.meta.name) store.rememberTrip({ id, name: data.meta.name, kind });
-    const sig = JSON.stringify([data.meta, data.items, S.files.map((f) => [f.id, f.itemId]), S.packing]);
+    const sig = JSON.stringify([data.meta, data.items, S.files.map((f) => [f.id, f.itemId]), S.packing, S.todos]);
     if (sig !== S.sig || roleChanged) { S.sig = sig; render({ fromData: true }); queueReminderSync(); }
   }, (st) => { S.status = st; renderStatus(); });
   renderStatus();
@@ -140,7 +142,7 @@ const remAuth = async () => ({ base: aiProxyUrl, token: await store.idToken(), t
 let tzlookup = null;
 async function tripReminders() {
   tzlookup = tzlookup || (await import('../vendor/tz-lookup/tz.js')).default;
-  return buildReminders({ meta: S.meta, items: S.items, packing: S.packing }, {
+  return buildReminders({ meta: S.meta, items: S.items, packing: S.packing, todos: S.todos }, {
     tzlookup, deviceTz: Intl.DateTimeFormat().resolvedOptions().timeZone, bufferPct: bufferPct(),
     routeFor: cachedRoute, currency: homeCurrency(S.meta),
   });
@@ -239,7 +241,7 @@ function render({ fromData = false } = {}) {
   // Don't rebuild the map for status-only updates while you're looking at it.
   if (fromData && name === 'map' && sheet.open) return;
   $$('.tabbar a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.tab === name));
-  $('#fab').hidden = name === 'trips' || name === 'packing' || !S.trip || !canEdit();
+  $('#fab').hidden = name === 'trips' || name === 'packing' || name === 'todo' || !S.trip || !canEdit();
   $('#chat-btn').hidden = name === 'trips' || !S.trip;
   document.body.dataset.view = name;
   if (name !== 'map') destroyMap();
@@ -251,6 +253,7 @@ function render({ fromData = false } = {}) {
     case 'trip': renderTripSettings(); break;
     case 'budget': renderBudget(); break;
     case 'packing': renderPacking(); break;
+    case 'todo': renderTodos(); break;
     default: renderToday(r.arg);
   }
   renderStatus();
@@ -489,6 +492,7 @@ function renderToday(arg) {
     ${banner}
     ${next}
     ${ctx.length ? `<div class="ctx">${ctx.map((c) => `<span>${c}</span>`).join('')}</div>` : ''}
+    ${day === today ? todosDueHtml(today) : ''}
     ${ag.events.length ? tilesToggle({ refresh: true }) : ''}
     ${ag.events.length || legs.length ? `<ol class="timeline">${rows}</ol>` : `<div class="empty"><p>Nothing planned for this day.</p>${canEdit() ? '<button type="button" class="btn" data-add>Add something</button>' : ''}</div>`}
     ${ag.tonight ? `<p class="tonight">🌙 Tonight: <strong>${esc(ag.tonight.title)}</strong>${ag.tonight.place?.name ? ` · ${esc(shortName(ag.tonight.place))}` : ''}</p>` : ''}
@@ -629,6 +633,16 @@ async function refreshToday() {
   render({ fromData: true });
   toast(tasks.length ? `Updated · ${tasks.length} live check${tasks.length === 1 ? '' : 's'} refreshed` : 'Up to date');
 }
+
+// To do: ticking a checkbox saves at once.
+main.addEventListener('change', (e) => {
+  const t = e.target.closest('[data-todo-toggle]');
+  if (!t) return;
+  const it = S.todos.find((x) => x.id === t.dataset.todoToggle);
+  if (!it) return;
+  const { doneAt, doneBy, ...rest } = it;
+  writeTodo((b, id) => b.saveTodo(id, t.checked ? { ...rest, done: true, doneAt: new Date().toISOString(), ...(S.settings.name ? { doneBy: S.settings.name } : {}) } : { ...rest, done: false }));
+});
 
 // Packing: ticking a checkbox saves at once.
 main.addEventListener('change', (e) => {
@@ -808,7 +822,8 @@ function ideasCard() {
   const ideas = ideasList();
   if (!ideas.length && !canEdit()) return '';
   return `<section class="card ideas-card" id="ideas">
-    <h2><span>💡 Ideas${ideas.length ? ` <span class="muted small">${ideas.length}</span>` : ''}</span></h2>
+    <h2><span>💡 Ideas${ideas.length ? ` <span class="muted small">${ideas.length}</span>` : ''}</span>
+      ${canEdit() ? '<button type="button" class="btn ghost small" data-idea-new>＋ Add idea</button>' : ''}</h2>
     ${ideas.length ? `<ul class="ideas-list">${ideas.map((x) => `<li>
       <span class="idea-icon" aria-hidden="true">${PLACE_ICON[x.category] || '📍'}</span>
       <span class="idea-body"><strong>${esc(x.name)}</strong>${x.when ? ` <span class="muted small">· ${esc(x.when)}</span>` : ''}
@@ -818,8 +833,151 @@ function ideasCard() {
         <span class="idea-actions"><a class="small" href="${esc(mapSearchUrl(x.address ? `${x.name}, ${x.address}` : x.name))}" target="_blank" rel="noopener">Map</a>
         ${canEdit() ? `<button type="button" class="link small" data-idea-plan="${esc(x.id)}">＋ Add to plan</button>
         <button type="button" class="link small danger-link" data-idea-remove="${esc(x.id)}">Remove</button>` : ''}</span></span></li>`).join('')}</ul>`
-      : '<p class="muted small">Save restaurants, activities and places you might do from the 💬 chat or the day summary on Today. Everyone on the trip sees them here.</p>'}
+      : '<p class="muted small">Restaurants, activities and places you might do. Add them here, or save them from the 💬 chat or the day summary on Today. Everyone on the trip sees them.</p>'}
   </section>`;
+}
+
+// ---------- To do ----------
+
+/** To-do writes are open to everyone on the trip (view link included), like packing. */
+async function writeTodo(fn) {
+  const p = fn(backend(), S.trip.id);
+  if (S.trip.kind === 'cloud') {
+    p.catch((e) => toast(e.code === 'permission-denied'
+      ? 'The to-do list needs the updated database rules (see README: paste firestore.rules again).'
+      : `Not saved: ${e.message}`));
+    return;
+  }
+  try { await p; } catch (e) { toast(e.message); throw e; }
+}
+
+/** Add a to-do ({text, due, who, note}); returns false if it's already there. */
+function addTodo(t, source = 'manual') {
+  if (hasTodo(S.todos, t.text)) { toast('That\'s already on the to-do list'); return false; }
+  const todo = cleanItem({ id: uid(16), text: String(t.text).trim().slice(0, 200), due: t.due, who: t.who, note: t.note, done: false, source, at: new Date().toISOString(), by: S.settings.name });
+  writeTodo((b, id) => b.saveTodo(id, todo));
+  return true;
+}
+
+function todoCard() {
+  const pr = todoProgress(S.todos);
+  const today = localDate();
+  const due = S.todos.filter((t) => !t.done && t.due && t.due <= today).length;
+  return `<a class="card pack-card todo-card" href="#/todo">
+    <span class="pack-card-title"><strong>✅ To do</strong>
+      <span class="muted small">${pr.total ? `${pr.done} of ${pr.total} done${due ? ` · <span class="warn-text">${due} due</span>` : ''}` : 'Things to book, buy or sort out before you go'}</span></span>
+    ${pr.total ? `<span class="meter small-meter"><span style="width:${Math.round((pr.done / pr.total) * 100)}%"></span></span>` : ''}
+    <span aria-hidden="true" class="chev">›</span></a>`;
+}
+
+/** On Today: to-dos that are due or overdue. */
+function todosDueHtml(today) {
+  const due = sortTodos(S.todos).open.filter((t) => t.due && t.due <= today);
+  if (!due.length) return '';
+  return `<a class="todo-due" href="#/todo">✅ <strong>${due.length} to-do${due.length === 1 ? '' : 's'} due</strong>
+    <span class="muted small">${esc(due.slice(0, 2).map((t) => t.text).join(' · '))}${due.length > 2 ? ' …' : ''}</span></a>`;
+}
+
+const todoPrefKey = () => `tp:todo:${S.trip?.id}`;
+const todoShowDone = () => { try { return localStorage.getItem(todoPrefKey()) !== 'hide'; } catch { return true; } };
+
+function renderTodos() {
+  if (loadingOrMissing()) return;
+  const today = localDate();
+  const { open, done } = sortTodos(S.todos);
+  const pr = todoProgress(S.todos);
+  const showDone = todoShowDone();
+  const people = splitPacking(S.packing).people.map((p) => p.name);
+  const row = (t) => {
+    const d = t.done ? { text: '', cls: '' } : dueInfo(t.due, today);
+    const meta = [d.text && `<span class="due ${d.cls}">${esc(d.text)}</span>`, t.who && `👤 ${esc(t.who)}`,
+      t.source === 'chat' && '💬 from the chat', t.done && t.doneBy && `done by ${esc(t.doneBy)}`].filter(Boolean);
+    return `<li class="pk todo ${t.done ? 'done' : ''}">
+      <label><input type="checkbox" data-todo-toggle="${esc(t.id)}" ${t.done ? 'checked' : ''}>
+        <span class="todo-body"><span class="pk-name">${esc(t.text)}</span>
+          ${t.note ? `<span class="muted small">${esc(t.note)}</span>` : ''}
+          ${meta.length ? `<span class="todo-meta small">${meta.join(' · ')}</span>` : ''}</span></label>
+      <button type="button" class="iconbtn small pk-del" data-todo-edit="${esc(t.id)}" aria-label="Edit ${esc(t.text)}">✎</button>
+      <button type="button" class="iconbtn small pk-del" data-todo-del="${esc(t.id)}" aria-label="Remove ${esc(t.text)}">✕</button></li>`;
+  };
+  main.innerHTML = `<div class="pk-top"><a class="iconbtn" href="#/plan" aria-label="Back to Plan">‹</a><h1>✅ To do</h1></div>
+    <p class="muted">${pr.total ? `${pr.done} of ${pr.total} done` : 'Things to book, buy or sort out. Everyone on the trip shares this list.'}</p>
+    ${pr.total ? `<div class="meter"><span style="width:${Math.round((pr.done / pr.total) * 100)}%"></span></div>` : ''}
+    <form class="card form pk-add" id="todo-add">
+      <h2>Add a to-do</h2>
+      <input name="text" placeholder="e.g. Book the airport transfer" autocomplete="off" aria-label="What to do" maxlength="200" required>
+      <div class="two">
+        <label>Do by (optional)<input type="date" name="due"></label>
+        <label>Who (optional)<input name="who" list="todo-people" autocomplete="off" maxlength="40" placeholder="Anyone"></label>
+      </div>
+      <datalist id="todo-people">${people.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+      <button class="btn">Add</button>
+    </form>
+    ${aiOn() ? '<p class="muted small">Tip: ask in the 💬 chat, e.g. "what do we still need to book?" or "add renewing the passports to the to-do list".</p>' : ''}
+    ${open.length ? `<section class="card"><h2>To do <span class="muted small">${open.length}</span></h2><ul class="pk-list">${open.map(row).join('')}</ul></section>`
+      : pr.total ? '<p class="empty">All done ✓</p>' : ''}
+    ${done.length ? `<section class="card"><h2 class="todo-done-head">Done <span class="muted small">${done.length}</span>
+      <button type="button" class="link small" data-todo-showdone>${showDone ? 'Hide' : 'Show'}</button></h2>
+      ${showDone ? `<ul class="pk-list">${done.map(row).join('')}</ul>
+      <p class="small"><button type="button" class="link small danger-link" data-todo-cleardone>Remove done items</button></p>` : ''}</section>` : ''}`;
+  $('#todo-add').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const text = String(fd.get('text') || '').trim();
+    if (!text) return;
+    if (addTodo({ text, due: fd.get('due'), who: String(fd.get('who') || '').trim() })) {
+      e.target.reset();
+      e.target.elements.text.focus();
+      toast('Added to the to-do list');
+    }
+  };
+}
+
+function openTodoEdit(t) {
+  const people = splitPacking(S.packing).people.map((p) => p.name);
+  openSheet(`<form class="form" id="todo-edit">
+    <div class="sheet-head"><h2>✎ Edit to-do</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    <label>What to do<input name="text" value="${esc(t.text)}" maxlength="200" required autocomplete="off"></label>
+    <div class="two">
+      <label>Do by<input type="date" name="due" value="${esc(t.due || '')}"></label>
+      <label>Who<input name="who" list="todo-people-edit" value="${esc(t.who || '')}" maxlength="40" autocomplete="off"></label>
+    </div>
+    <datalist id="todo-people-edit">${people.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+    <label>Notes<textarea name="note" rows="3" maxlength="500">${esc(t.note || '')}</textarea></label>
+    <div class="row"><span class="grow"></span><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Save</button></div>
+  </form>`, 'Edit to-do');
+  $('#todo-edit').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const text = String(fd.get('text') || '').trim();
+    if (!text) return;
+    const { due, who, note, ...rest } = t;
+    writeTodo((b, id) => b.saveTodo(id, cleanItem({ ...rest, text, due: fd.get('due'), who: String(fd.get('who') || '').trim(), note: String(fd.get('note') || '').trim() })));
+    closeSheet();
+  };
+}
+
+/** Add an idea by hand: a restaurant, activity or place you might do. */
+function openIdeaForm() {
+  openSheet(`<form class="form" id="idea-form">
+    <div class="sheet-head"><h2>💡 Add an idea</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
+    <label>Name<input name="name" required maxlength="120" autocomplete="off" placeholder="e.g. Dishoom, sunset boat trip"></label>
+    <div class="two">
+      <label>Kind<select name="category">${Object.entries({ attraction: 'Attraction', restaurant: 'Restaurant', cafe: 'Café', bar: 'Bar', shopping: 'Shopping', event: 'Event', outdoors: 'Outdoors', other: 'Other' })
+        .map(([k, l]) => `<option value="${k}">${PLACE_ICON[k]} ${l}</option>`).join('')}</select></label>
+      <label>When (optional)<input name="when" maxlength="60" autocomplete="off" placeholder="e.g. Thu lunch"></label>
+    </div>
+    <label>Address or area (optional)<input name="address" maxlength="200" autocomplete="off"></label>
+    <label>Why / notes (optional)<textarea name="why" rows="2" maxlength="300"></textarea></label>
+    <div class="row"><span class="grow"></span><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Save idea</button></div>
+  </form>`, 'Add an idea');
+  $('#idea-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const p = Object.fromEntries(['name', 'category', 'when', 'address', 'why'].map((k) => [k, String(fd.get(k) || '').trim()]));
+    if (!p.name) return;
+    if (await saveIdea(p, 'manual')) closeSheet();
+  };
 }
 
 // ---------- Packing ----------
@@ -995,13 +1153,14 @@ function renderPlan() {
   const today = localDate();
   if (!S.items.length) {
     main.innerHTML = `<h1>Plan</h1><div class="empty"><p>No plans yet. Add flights, hotels, car hire, drives and activities.</p>
-      ${canEdit() ? '<button type="button" class="btn" data-add>Add the first item</button>' : ''}</div>${packingCard()}${ideasCard()}`;
+      ${canEdit() ? '<button type="button" class="btn" data-add>Add the first item</button>' : ''}</div>${todoCard()}${packingCard()}${ideasCard()}`;
     return;
   }
   const counts = Object.fromEntries(Object.keys(TYPES).map((k) => [k, S.items.filter((i) => i.type === k).length]));
   main.innerHTML = `<h1>Plan</h1>
     <p class="muted">${esc(fmtDate(span.start, { long: true }))} – ${esc(fmtDate(span.end, { long: true }))} · ${days.length} day${days.length === 1 ? '' : 's'}</p>
     <div class="ctx">${Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `<span>${TYPES[k].icon} ${n} ${esc(n === 1 ? TYPES[k].label.toLowerCase() : TYPES[k].plural)}</span>`).join('')}</div>
+    ${todoCard()}
     ${packingCard()}
     ${ideasCard()}
     ${tilesToggle()}
@@ -1355,19 +1514,7 @@ function renderTripSettings() {
           <label>Time format<select name="h12"><option value="0">24-hour</option><option value="1" ${S.settings.h12 ? 'selected' : ''}>12-hour</option></select></label>
           <label>Distances<select name="unit"><option value="km">km</option><option value="mi" ${S.settings.unit === 'mi' ? 'selected' : ''}>miles</option></select></label>
           <label>Directions open in<select name="maps"><option value="google">Google Maps</option><option value="apple" ${S.settings.maps === 'apple' ? 'selected' : ''}>Apple Maps</option></select></label>
-          <label>Answers to 🎤 questions<select name="voiceReplies"><option value="1">Read aloud</option><option value="0" ${S.settings.voiceReplies === false ? 'selected' : ''}>Text only</option></select></label>
-          <label class="span2">Voice<select name="voiceName">
-            ${aiProxyUrl ? `<option value="">Natural (${esc(NATURAL_VOICES.find(([k]) => k === voiceId())?.[1] || 'automatic')})</option>
-            ${NATURAL_VOICES.map(([k, label]) => `<option value="${k}" ${S.settings.voiceName === k ? 'selected' : ''}>Natural: ${esc(label)}</option>`).join('')}` : ''}
-            <option value="phone" ${S.settings.voiceName === 'phone' || !aiProxyUrl ? 'selected' : ''}>Phone's built-in voice</option></select></label>
         </div>
-        <details class="small voice-check"><summary>🔊 Test voice</summary>
-          <p class="muted">Plays a test sentence. Natural voices come from the trip server and work on shared trips; the phone's own voice can sound robotic and doesn't work in Home Screen apps on some iPhones.</p>
-          <div class="row">${aiProxyUrl ? '<button type="button" class="btn ghost small" data-voice-test="natural">Test natural voice</button>' : ''}
-          <button type="button" class="btn ghost small" data-voice-test="chat">Test phone voice</button>
-          <button type="button" class="btn ghost small" data-voice-test="plain">Phone voice (simple)</button></div>
-          <ol class="voice-log" id="voice-log" aria-live="polite"></ol>
-        </details>
       </form>
     </section>
     <section class="card">
@@ -1440,30 +1587,9 @@ function renderTripSettings() {
   };
   const aiOff = $('#ai-off');
   if (aiOff) aiOff.onclick = () => { S.settings = store.setSettings({ aiKey: '' }); toast('Key removed from this device'); render(); };
-  let voiceTestRun = 0;
-  $$('[data-voice-test]').forEach((b) => {
-    b.onclick = () => {
-      const out = $('#voice-log');
-      out.innerHTML = '';
-      const run = ++voiceTestRun; // messages from an earlier test that arrive late are ignored
-      const add = (t) => { if (out.isConnected && run === voiceTestRun) out.insertAdjacentHTML('beforeend', `<li>${esc(t)}</li>`); };
-      if (b.dataset.voiceTest !== 'natural') { voice.voiceTest({ plain: b.dataset.voiceTest === 'plain', onLog: add }); return; }
-      if (S.trip.kind !== 'cloud') { add('Natural voices work on shared trips.'); return; }
-      voice.stopSpeaking();
-      voice.unlockAudio();
-      const name = voiceId();
-      add(`Asking the trip server for the ${NATURAL_VOICES.find(([k]) => k === name)?.[1] || name} voice…`);
-      fetchSpeech('Hello! This is the voice that will read your trip answers.', name)
-        .then((blob) => { naturalMissingUntil = 0; add(`Got ${Math.round(blob.size / 1024)} KB of audio. Playing…`); return voice.playAudio(blob, { onEnd: () => add('✅ Finished. Did you hear it?') }); })
-        .catch((e) => add(e.status === 501 || e.status === 404
-          ? '❌ The trip server isn\'t set up for voice yet (it needs the Workers AI binding and the latest worker code).'
-          : e.name === 'NotAllowedError' ? '❌ The phone blocked playback. Tap the button again.' : `❌ ${e.message}`));
-    };
-  });
   $('#prefs').onchange = (e) => {
     const fd = new FormData(e.currentTarget);
-    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps'), voiceReplies: fd.get('voiceReplies') !== '0', voiceName: fd.get('voiceName') || '' });
-    if (e.target.name === 'voiceName') naturalMissingUntil = 0;
+    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps') });
   };
   if (cloud) {
     let code = '';
@@ -1675,6 +1801,21 @@ main.addEventListener('click', (e) => {
   if (ideaSave) {
     const x = liveGet(briefKey(S.viewDay))?.data?.suggestions?.[Number(ideaSave.dataset.ideaSave)];
     if (x) saveIdea(x, 'summary');
+    return;
+  }
+  if (e.target.closest('[data-idea-new]')) { openIdeaForm(); return; }
+  const todoDel = e.target.closest('[data-todo-del]');
+  if (todoDel) { writeTodo((b, id) => b.deleteTodo(id, todoDel.dataset.todoDel)); return; }
+  const todoEdit = e.target.closest('[data-todo-edit]');
+  if (todoEdit) { const t = S.todos.find((x) => x.id === todoEdit.dataset.todoEdit); if (t) openTodoEdit(t); return; }
+  if (e.target.closest('[data-todo-showdone]')) {
+    try { localStorage.setItem(todoPrefKey(), todoShowDone() ? 'hide' : 'show'); } catch { /* ignore */ }
+    renderTodos();
+    return;
+  }
+  if (e.target.closest('[data-todo-cleardone]')) {
+    const done = S.todos.filter((t) => t.done);
+    if (done.length && confirm(`Remove ${done.length} done item${done.length === 1 ? '' : 's'} from the list?`)) done.forEach((t) => writeTodo((b, id) => b.deleteTodo(id, t.id)));
     return;
   }
   const ideaPlan = e.target.closest('[data-idea-plan]');
@@ -2348,117 +2489,7 @@ let chatListening = null; // the open microphone, if any
 function chatVoiceOff() {
   chatListening?.stop();
   chatListening = null;
-  stopReading();
 }
-// Voice answers: natural voices made by the trip server (Workers AI), or the
-// phone's own voice for device-only trips, older servers, or by choice.
-const NATURAL_VOICES = [
-  ['pandora', 'British woman'], ['draco', 'British man'], ['thalia', 'American woman'],
-  ['apollo', 'American man'], ['theia', 'Australian woman'], ['hyperion', 'Australian man'],
-];
-let naturalMissingUntil = 0; // the trip server recently said it has no voice set up
-const naturalVoice = () => !!(aiProxyUrl && S.trip?.kind === 'cloud' && S.settings.voiceName !== 'phone' && Date.now() > naturalMissingUntil);
-function voiceId() {
-  if (NATURAL_VOICES.some(([k]) => k === S.settings.voiceName)) return S.settings.voiceName;
-  const l = (navigator.language || '').toLowerCase();
-  return l.startsWith('en-gb') || l.startsWith('en-ie') ? 'pandora' : l.startsWith('en-au') || l.startsWith('en-nz') ? 'theia' : 'thalia';
-}
-async function fetchSpeech(text, voiceName = voiceId(), { timeoutMs = 25000 } = {}) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${aiProxyUrl}/v1/speech`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${await store.idToken()}`, 'x-trip-id': S.trip.id },
-      body: JSON.stringify({ text, voice: voiceName }),
-      signal: ctl.signal,
-    });
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}));
-      const e = new Error(String(d.error?.message || `Voice error ${res.status}`).replace(/^Trip AI: /, ''));
-      e.status = res.status;
-      throw e;
-    }
-    return await res.blob();
-  } catch (e) {
-    if (e.name === 'AbortError') throw new Error('The voice took too long to arrive. Try again, or check your connection.');
-    throw e;
-  } finally { clearTimeout(timer); }
-}
-/** Call in the tap that will lead to reading something aloud. */
-function unlockVoice() {
-  if (naturalVoice()) { voice.stopSpeaking(); voice.unlockAudio(); return; }
-  // Phone voice: something already playing means it's unlocked; else unlock it now.
-  if (voice.isSpeaking()) voice.stopSpeaking(); else voice.unlockSpeech();
-}
-let readSeq = 0;
-/**
- * Read an answer aloud. onState(state, extra) reports progress:
- * 'loading' (waiting for the server) → 'starting' (audio here, phone starting
- * it) → 'playing' → 'done'; 'blocked' (extra: play() to call from a tap) when
- * the phone won't start the sound by itself; 'error' (extra: message).
- * Natural voice is fetched in short pieces, so it starts quickly and each
- * piece stays small; the next piece loads while one plays.
- */
-async function readAloud(text, { onState } = {}) {
-  const seq = ++readSeq;
-  const plain = speakableText(text);
-  const live = () => seq === readSeq;
-  const state = (st, x) => { if (live() || st === 'done') onState?.(st, x); };
-  if (naturalVoice()) {
-    const pieces = voice.speechChunks(plain, 320);
-    const fetches = [];
-    const get = (i) => {
-      if (!fetches[i]) { fetches[i] = fetchSpeech(pieces[i]); fetches[i].catch(() => {}); }
-      return fetches[i];
-    };
-    // Play piece i; resolves when it ends. Rejects 'blocked' if the phone won't start it.
-    const playPiece = (blob, onStart) => new Promise((resolve, reject) => {
-      let started = false;
-      const timer = setTimeout(() => { if (!started) { voice.stopAudio(); reject(Object.assign(new Error('blocked'), { name: 'NotAllowedError' })); } }, 6000);
-      voice.playAudio(blob, { onEnd: () => { clearTimeout(timer); if (started) resolve(); } })
-        .then(() => { started = true; clearTimeout(timer); onStart(); }, (e) => { clearTimeout(timer); reject(e); });
-    });
-    const run = async (from) => {
-      for (let i = from; i < pieces.length; i++) {
-        let blob;
-        try { blob = await get(i); } catch (e) {
-          if (!live()) return;
-          if (i === 0 && (e.status === 501 || e.status === 404)) { naturalMissingUntil = Date.now() + 60000; return 'fallback'; }
-          // Natural voice busy or over its allowance: use this device's own voice where that works.
-          if (i === 0 && (e.status === 429 || e.status === 502) && voice.phoneVoiceWorks()) { toast(`${e.message} Using this device's voice for now.`); return 'fallback'; }
-          state('error', e.message);
-          return;
-        }
-        if (!live()) return;
-        if (i + 1 < pieces.length) get(i + 1); // load the next piece while this one plays
-        if (i === from) state('starting');
-        try {
-          await playPiece(blob, () => { if (live()) state('playing'); });
-        } catch (e) {
-          if (!live()) return;
-          if (e.name === 'NotAllowedError') { state('blocked', () => { state('starting'); run(i); }); return; }
-          state('error', 'This phone couldn\'t play the voice.');
-          return;
-        }
-        if (!live()) return;
-      }
-      state('done');
-    };
-    state('loading');
-    if (await run(0) !== 'fallback') return;
-  }
-  if (!voice.phoneVoiceWorks()) {
-    state('error', aiProxyUrl && S.trip?.kind === 'cloud'
-      ? 'The trip server isn\'t set up for voice yet (see Trip → Test voice).'
-      : 'Reading aloud needs a shared trip on this iPhone.');
-    return;
-  }
-  state('playing');
-  voice.speak(plain, { onEnd: () => state('done') });
-}
-function stopReading() { readSeq++; voice.stopSpeaking(); }
-
 const VOICE_ERRORS = {
   'not-allowed': 'Microphone access is off for this app. Allow it in your phone\'s Settings, or tap the 🎤 on your keyboard to dictate.',
   'service-not-allowed': 'Voice questions aren\'t available in this app on this phone. Tap the 🎤 on your keyboard to dictate instead.',
@@ -2472,6 +2503,7 @@ function chatLoad() { try { return JSON.parse(localStorage.getItem(chatKey())) |
 function chatSave(msgs) { try { localStorage.setItem(chatKey(), JSON.stringify(msgs.slice(-40))); } catch { /* full */ } }
 
 const CHAT_STARTERS = [
+  'What do we still need to book or sort out?',
   'What\'s on today?',
   'What time do we need to leave for the airport?',
   'How much have we paid so far, and what\'s still due?',
@@ -2503,9 +2535,14 @@ function chatBubble(m, mi) {
         <span class="idea-actions"><a class="small" href="${esc(mapSearchUrl(p.address ? `${p.name}, ${p.address}` : p.name))}" target="_blank" rel="noopener">Map</a>
         ${canEdit() ? `${isSavedIdea(ideasList(), p.name) ? '<span class="small saved">✓ In Ideas</span>' : `<button type="button" class="link small" data-chat-save="${mi}:${pi}">☆ Save idea</button>`}
         <button type="button" class="link small" data-chat-plan="${mi}:${pi}">＋ Add to plan</button>` : ''}</span></span></div>`).join('')}</div>` : '';
-  const read = !m.error && voice.canSpeak() ? `<button type="button" class="link small read-aloud" data-chat-speak="${mi}" aria-label="Read this answer aloud">🔊 Read aloud</button>` : '';
+  const todos = (m.todos || []).length ? `<div class="places">${m.todos.map((t, ti) => `<div class="place-card todo-card-chat">
+      <span class="idea-icon" aria-hidden="true">✅</span>
+      <span class="idea-body"><strong>${esc(t.text)}</strong>${t.due ? ` <span class="muted small">· by ${esc(fmtDate(t.due))}</span>` : ''}
+        ${t.note ? `<span class="small">${esc(t.note)}</span>` : ''}
+        <span class="idea-actions">${hasTodo(S.todos, t.text) ? '<span class="small saved">✓ On the to-do list</span>'
+          : `<button type="button" class="link small" data-chat-todo="${mi}:${ti}">＋ Add to to-do</button>`}</span></span></div>`).join('')}</div>` : '';
   return `<li class="msg bot"><div class="bubble">${m.error ? `<p class="error">${esc(m.text)}</p>` : renderMarkdown(m.text)}
-    ${places}${read}
+    ${places}${todos}
     ${(m.sources || []).length ? `<div class="sources"><span class="muted small">Sources:</span> ${m.sources.map((x) => `<a class="small" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>`).join(' · ')}</div>` : ''}</div></li>`;
 }
 
@@ -2520,8 +2557,7 @@ function openChat() {
   }
   openSheet(`<div class="chat">
     <div class="sheet-head"><h2>💬 Ask about this trip</h2>
-      <span class="row"><button type="button" class="link small" id="chat-stop" hidden>■ Stop reading</button>
-      <button type="button" class="link small" id="chat-new">New chat</button>
+      <span class="row">      <button type="button" class="link small" id="chat-new">New chat</button>
       <button type="button" class="iconbtn" data-close aria-label="Close">✕</button></span></div>
     <ol class="chat-log" id="chat-log" aria-live="polite"></ol>
     <div class="chat-starters" id="chat-starters"></div>
@@ -2536,32 +2572,7 @@ function openChat() {
   const log = $('#chat-log');
   const q = $('#chat-q');
   const mic = $('#chat-mic');
-  const stopBtn = $('#chat-stop');
   const PLACEHOLDER = q.placeholder;
-  // One button shows what reading aloud is doing: getting the voice, stop, or play (when the phone needs a tap).
-  let playBlocked = null;
-  const voiceBtn = (label) => {
-    if (!stopBtn.isConnected) return;
-    stopBtn.hidden = !label;
-    stopBtn.textContent = label || '';
-  };
-  const say = (text) => {
-    playBlocked = null;
-    readAloud(text, {
-      onState: (st, x) => {
-        if (st === 'loading') voiceBtn('⏳ Getting voice… ■');
-        else if (st === 'starting') voiceBtn('⏳ Starting… ■');
-        else if (st === 'playing') voiceBtn('■ Stop reading');
-        else if (st === 'blocked') { playBlocked = x; voiceBtn('▶ Play answer'); }
-        else if (st === 'error') { voiceBtn(''); toast(x); }
-        else voiceBtn('');
-      },
-    });
-  };
-  stopBtn.onclick = () => {
-    if (playBlocked) { const play = playBlocked; playBlocked = null; play(); return; }
-    stopReading(); voiceBtn('');
-  };
   const micState = (on) => {
     mic.classList.toggle('on', on);
     mic.setAttribute('aria-pressed', String(on));
@@ -2572,9 +2583,6 @@ function openChat() {
     if (chatListening) { chatListening.stop(); return; }
     if (chatAbort) return;
     if (!voice.canListen()) { toast(VOICE_ERRORS.unsupported); q.focus(); return; }
-    readSeq++;
-    unlockVoice();
-    stopBtn.hidden = true;
     q.value = '';
     micState(true);
     chatListening = voice.listen({
@@ -2583,7 +2591,7 @@ function openChat() {
         chatListening = null;
         if (!mic.isConnected) return;
         micState(false);
-        if (t.trim()) send(t, { spoken: true }); else toast(VOICE_ERRORS['no-speech']);
+        if (t.trim()) send(t); else toast(VOICE_ERRORS['no-speech']);
       },
       onError: (code) => {
         chatListening = null;
@@ -2604,12 +2612,11 @@ function openChat() {
   $('#chat-new').onclick = () => { chatAbort?.abort(); chatSave([]); draw(); q.focus(); };
   // Place cards: save to Ideas, or add to the plan (then come back to the chat).
   log.addEventListener('click', (e) => {
-    const r = e.target.closest('[data-chat-speak]');
-    if (!r) return;
-    const m = chatLoad()[Number(r.dataset.chatSpeak)];
-    if (!m?.text) return;
-    unlockVoice();
-    say(m.text);
+    const b = e.target.closest('[data-chat-todo]');
+    if (!b) return;
+    const [mi, ti] = b.dataset.chatTodo.split(':').map(Number);
+    const t = chatLoad()[mi]?.todos?.[ti];
+    if (t && addTodo(t, 'chat')) { b.outerHTML = '<span class="small saved">✓ On the to-do list</span>'; toast('Added to the to-do list (Plan → ✅ To do)'); }
   });
   log.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-chat-save], [data-chat-plan]');
@@ -2630,7 +2637,7 @@ function openChat() {
   q.addEventListener('input', () => { q.style.height = 'auto'; q.style.height = `${Math.min(q.scrollHeight, 140)}px`; });
   $('#chat-form').onsubmit = (e) => { e.preventDefault(); send(q.value); };
 
-  async function send(text, { spoken = false } = {}) {
+  async function send(text) {
     text = String(text || '').trim();
     if (!text || chatAbort) return;
     const tripId = S.trip.id;
@@ -2649,17 +2656,17 @@ function openChat() {
     try {
       const content = await askTrip(await aiAuth(), {
         system: CHAT_SYSTEM,
-        context: buildTripContext({ meta: S.meta, items: S.items, files: S.files, now: localDateTime(), live: liveNotes(), packing: S.packing }),
+        context: buildTripContext({ meta: S.meta, items: S.items, files: S.files, now: localDateTime(), live: liveNotes(), packing: S.packing, todos: S.todos }),
         history: before.filter((m) => !m.error).slice(-20).map((m) => ({ role: m.role, text: m.text })),
-        question: spoken ? `${text}${VOICE_NOTE}` : text,
+        question: text,
         signal: chatAbort.signal,
         onText: (t) => { if (li.isConnected) { $('.bubble', li).innerHTML = renderMarkdown(t); log.scrollTop = log.scrollHeight; } },
       });
       if (S.trip?.id !== tripId) return;
       const places = placesFrom(content);
-      const answer = answerText(content) || (places.length ? 'Here are some ideas:' : 'Sorry, I don\'t have an answer for that.');
-      chatSave([...msgs, { role: 'assistant', text: answer, sources: sourcesFrom(content), places, at: Date.now(), spoken }]);
-      if (spoken && S.settings.voiceReplies !== false && log.isConnected) say(answer);
+      const todos = todosFrom(content);
+      const answer = answerText(content) || (places.length ? 'Here are some ideas:' : todos.length ? 'Here\'s what to add:' : 'Sorry, I don\'t have an answer for that.');
+      chatSave([...msgs, { role: 'assistant', text: answer, sources: sourcesFrom(content), places, todos, at: Date.now() }]);
     } catch (err) {
       if (err?.name === 'AbortError' || chatAbort?.signal.aborted) return;
       if (S.trip?.id === tripId) chatSave([...msgs, { role: 'assistant', text: friendlyError(err), error: true, at: Date.now() }]);

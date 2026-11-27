@@ -36,9 +36,6 @@ class FakeKV {
 // Notifications the trip server sent (to the phones' push services).
 const pushes = [];
 const proxyEnv = { ANTHROPIC_API_KEY: 'sk-ant-server-key', ALLOWED_ORIGIN: `http://localhost:${PORT}`, FIREBASE_PROJECT_ID: 'demo-trips', USAGE: new FakeKV(), DAILY_LIMIT: '3' };
-// Workers AI text-to-speech (natural voice answers), simulated.
-const speechCalls = [];
-proxyEnv.AI = { run: async (model, inputs, opts) => { speechCalls.push({ model, inputs, opts }); return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x64, 1, 2]), { headers: { 'content-type': 'audio/mpeg' } }); } };
 let proxyHandler;
 async function getProxy() {
   if (proxyHandler) return proxyHandler;
@@ -115,18 +112,6 @@ async function main() {
       route.fulfill({ status: 200, contentType: 'text/javascript', body: fs.readFileSync(file) });
     });
     await context.route('**/travel-planner/js/config.js', (route) => route.fulfill({ contentType: 'text/javascript', body: CONFIG }));
-    // The phone's audio player: record what's played, and finish playing straight away.
-    await context.addInitScript(() => {
-      window.__played = [];
-      HTMLMediaElement.prototype.play = function play() {
-        // Like an iPhone after using the microphone: the next answer needs a tap.
-        if (window.__blockNext && this.src.startsWith('blob:')) { window.__blockNext = false; return Promise.reject(new DOMException('needs a tap', 'NotAllowedError')); }
-        window.__played.push(this.src.split(':')[0]);
-        if (this.src.startsWith('blob:')) setTimeout(() => this.dispatchEvent(new Event('ended')), 50);
-        return Promise.resolve();
-      };
-      HTMLMediaElement.prototype.pause = function pause() {};
-    });
     await context.route('https://trip-ai.test/**', async (route) => {
       const r = route.request();
       const handler = await getProxy();
@@ -318,6 +303,17 @@ async function main() {
       await alice.getByText('1 of 1 packed').waitFor();
     });
 
+    await check('to-do list: a view-only phone adds and ticks; the admin sees it live', async () => {
+      await viewer.goto(`${BASE}#/todo`);
+      await viewer.getByLabel('What to do').fill('Buy travel insurance');
+      await viewer.getByRole('button', { name: 'Add', exact: true }).click();
+      await alice.goto(`${BASE}#/todo`);
+      await alice.locator('.todo', { hasText: 'Buy travel insurance' }).waitFor({ timeout: 15000 });
+      await viewer.locator('.todo', { hasText: 'Buy travel insurance' }).getByRole('checkbox').check({ timeout: 15000 });
+      await alice.locator('.todo.done', { hasText: 'Buy travel insurance' }).waitFor({ timeout: 15000 });
+      await alice.getByText('1 of 1 done').waitFor();
+    });
+
     await check('reminders: a phone turns them on, the server gets the plan\'s reminders and sends them when due', async () => {
       const day = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
       await alice.goto(`${BASE}#/today`);
@@ -376,72 +372,6 @@ async function main() {
       await card.getByRole('button', { name: 'Turn off' }).click();
       await card.getByRole('button', { name: /Turn on reminders/ }).waitFor();
       assert.equal(kv.get(subsKey), undefined);
-    });
-
-    await check('natural voice: answers are read by the trip server\'s voice, chosen per phone', async () => {
-      await viewer.goto(`${BASE}#/trip`);
-      await viewer.locator('#toast').waitFor({ state: 'hidden' });
-      await viewer.locator('.voice-check').evaluate((d) => { d.open = true; });
-      await viewer.getByRole('button', { name: 'Test natural voice' }).click();
-      await viewer.locator('#voice-log li', { hasText: 'Finished' }).waitFor({ timeout: 15000 });
-      assert.equal(speechCalls.at(-1).model, '@cf/deepgram/aura-2-en');
-      assert.equal(speechCalls.at(-1).inputs.speaker, 'thalia', 'American English phone: American voice');
-      assert.deepEqual(await viewer.evaluate(() => window.__played), ['data', 'blob'], 'unlocked in the tap, then played');
-      await viewer.locator('select[name=voiceName]').selectOption('draco');
-      await viewer.locator('.voice-check').evaluate((d) => { d.open = true; });
-      await viewer.locator('#toast').waitFor({ state: 'hidden' });
-      await viewer.getByRole('button', { name: 'Test natural voice' }).click();
-      await viewer.locator('#voice-log li', { hasText: 'Finished' }).waitFor({ timeout: 15000 });
-      assert.equal(speechCalls.at(-1).inputs.speaker, 'draco');
-
-      // In the chat, Read aloud uses it, with the answer as plain sentences.
-      await viewer.getByRole('button', { name: 'Ask about this trip' }).click();
-      const before = speechCalls.length;
-      await viewer.evaluate(() => { window.__played = []; });
-      await viewer.locator('.msg.bot').first().getByRole('button', { name: 'Read this answer aloud' }).click();
-      await viewer.waitForFunction(() => window.__played.includes('blob'));
-      for (let i = 0; i < 50 && speechCalls.length === before; i++) await viewer.waitForTimeout(100);
-      const said = speechCalls.at(-1).inputs.text;
-      assert.match(said, /10:00/);
-      assert.doesNotMatch(said, /\*\*/);
-      // If the phone won't start the sound by itself, one tap on ▶ Play answer does.
-      await viewer.evaluate(() => { window.__blockNext = true; window.__played = []; });
-      await viewer.locator('.msg.bot').first().getByRole('button', { name: 'Read this answer aloud' }).click();
-      await viewer.getByRole('button', { name: '▶ Play answer' }).click();
-      await viewer.waitForFunction(() => window.__played.includes('blob'));
-      await viewer.locator('#chat-stop').waitFor({ state: 'hidden' });
-      await viewer.locator('#sheet').getByRole('button', { name: 'Close' }).click();
-
-      // A long answer is read in pieces, one after another, so it starts quickly.
-      await viewer.evaluate(() => {
-        const key = Object.keys(localStorage).find((k) => k.startsWith('tp:chat:'));
-        const msgs = JSON.parse(localStorage.getItem(key));
-        const long = Array.from({ length: 8 }, (_, i) => `Sentence number ${i + 1} tells you something useful about the Colosseum, the Forum and the best time to visit.`).join(' ');
-        msgs.push({ role: 'user', text: 'Tell me everything' }, { role: 'assistant', text: long });
-        localStorage.setItem(key, JSON.stringify(msgs));
-        window.__played = [];
-      });
-      await viewer.getByRole('button', { name: 'Ask about this trip' }).click();
-      const n0 = speechCalls.length;
-      await viewer.locator('.msg.bot').last().getByRole('button', { name: 'Read this answer aloud' }).click();
-      await viewer.locator('#chat-stop').waitFor({ state: 'hidden', timeout: 15000 });
-      const pieces = speechCalls.slice(n0).map((c) => c.inputs.text);
-      assert.ok(pieces.length >= 3, `read in ${pieces.length} pieces`);
-      assert.ok(pieces.every((t) => t.length <= 320));
-      assert.match(pieces[0], /^Sentence number 1 /);
-      assert.match(pieces.at(-1), /Sentence number 8 /);
-      assert.equal(await viewer.evaluate(() => window.__played.filter((x) => x === 'blob').length), pieces.length, 'each piece played');
-      await viewer.locator('#sheet').getByRole('button', { name: 'Close' }).click();
-
-      // A server without voice set up says so.
-      const ai = proxyEnv.AI;
-      delete proxyEnv.AI;
-      await viewer.goto(`${BASE}#/trip`);
-      await viewer.locator('#toast').waitFor({ state: 'hidden' });
-      await viewer.locator('.voice-check').evaluate((d) => { d.open = true; });
-      await viewer.getByRole('button', { name: 'Test natural voice' }).click();
-      await viewer.locator('#voice-log li', { hasText: 'isn\'t set up for voice' }).waitFor({ timeout: 15000 });
-      proxyEnv.AI = ai;
     });
 
     await check('viewer can remove the trip from their phone only', async () => {

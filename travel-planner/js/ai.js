@@ -571,6 +571,23 @@ export const PLACES_TOOL = {
   }),
 };
 
+export const TODOS_TOOL = {
+  name: 'report_todos',
+  description: 'After answering, list tasks for the trip\'s shared to-do list (things to book, buy, check or sort out) so the app can show Add-to-to-do buttons. Call it at most once, only when the user asks to add or be reminded of tasks, or asks what still needs doing.',
+  strict: true,
+  eager_input_streaming: true,
+  input_schema: obj({
+    todos: {
+      type: 'array',
+      items: obj({
+        text: str('The task as a short instruction, under 100 characters, e.g. "Book the airport transfer"'),
+        due: str('Date it should be done by, YYYY-MM-DD, or empty if there is no clear deadline'),
+        note: str('One short line of useful detail, or empty'),
+      }),
+    },
+  }),
+};
+
 /**
  * Ask a question about the trip. `history` is [{role, text}] of earlier turns;
  * `context` is the trip as text. Streams the answer through onText(fullTextSoFar).
@@ -596,7 +613,7 @@ export async function askTrip(apiKey, { system, context, history, question, onTe
         { type: 'text', text: system },
         { type: 'text', text: `# Trip data\n\n${context}`, cache_control: { type: 'ephemeral' } },
       ],
-      tools: [{ ...WEB_SEARCH, max_uses: 3 }, PLACES_TOOL],
+      tools: [{ ...WEB_SEARCH, max_uses: 3 }, PLACES_TOOL, TODOS_TOOL],
       tool_choice: { type: 'auto' },
       messages,
     }, { signal });

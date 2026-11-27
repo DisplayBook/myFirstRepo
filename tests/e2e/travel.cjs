@@ -73,7 +73,6 @@ async function main() {
     // Most checks read tile details, so start phones with tiles expanded (compact is tested separately).
     await context.addInitScript(() => { if (!localStorage.getItem('tp:settings')) localStorage.setItem('tp:settings', JSON.stringify({ tiles: 'full' })); });
     await context.addInitScript(() => {
-      window.__spoken = [];
       window.__say = '';
       class FakeRecognition {
         start() {
@@ -88,12 +87,6 @@ async function main() {
         stop() {}
       }
       window.SpeechRecognition = FakeRecognition;
-      window.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) { this.text = text; };
-      Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
-        speaking: false, pending: false, paused: false,
-        // Silent utterances (the tap-to-unlock) aren't heard, so aren't recorded.
-        speak(u) { if (u.text.trim() && u.volume !== 0) window.__spoken.push(u.text); setTimeout(() => { u.onstart?.(); u.onend?.(); }, 30); }, cancel() {}, getVoices() { return []; },
-      } });
     });
     const page = await context.newPage();
     const errors = [];
@@ -379,14 +372,24 @@ async function main() {
           // Trip chat: stream the answer as server-sent events, like the real API.
           const n = calls.filter((c) => c.body.stream).length;
           const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
-          const answer = n === 1 ? 'Your hotel booking reference is **HP-778**.\n\n- Check-in from 15:00'
+          const asksTodo = /to-?do|still need to/i.test(JSON.stringify(body.messages.at(-1).content));
+          const answer = asksTodo ? 'Two things to sort out before you go:'
+            : n === 1 ? 'Your hotel booking reference is **HP-778**.\n\n- Check-in from 15:00'
             : n === 2 ? 'It should be sunny.' : 'Two good options near your hotel:\n\n- **Katz\'s Delicatessen** for lunch\n- **Top of the Rock** at sunset';
           // The third answer recommends places and reports them through report_places.
           const placesJson = JSON.stringify({ places: [
             { name: 'Katz\'s Delicatessen', category: 'restaurant', why: 'Famous pastrami sandwiches.', when: 'Lunch', address: '205 E Houston St, New York' },
             { name: 'Top of the Rock', category: 'attraction', why: 'Best skyline views at sunset.', when: 'Sunset', address: '30 Rockefeller Plaza, New York' },
           ] });
-          const toolBlock = n === 3
+          const todosJson = JSON.stringify({ todos: [
+            { text: 'Book the airport transfer', due: '2026-11-28', note: 'JFK to Hotel Penn on Tue 1 Dec' },
+            { text: 'Buy MoMA tickets online', due: '', note: '' },
+          ] });
+          const toolBlock = asksTodo
+            ? ev('content_block_start', { index: 1, content_block: { type: 'tool_use', id: 'toolu_todos', name: 'report_todos', input: {} } })
+              + ev('content_block_delta', { index: 1, delta: { type: 'input_json_delta', partial_json: todosJson } })
+              + ev('content_block_stop', { index: 1 })
+            : n === 3
             ? ev('content_block_start', { index: 1, content_block: { type: 'tool_use', id: 'toolu_places', name: 'report_places', input: {} } })
               + placesJson.match(/.{1,40}/gs).map((t) => ev('content_block_delta', { index: 1, delta: { type: 'input_json_delta', partial_json: t } })).join('')
               + ev('content_block_stop', { index: 1 })
@@ -397,7 +400,7 @@ async function main() {
             + (n === 2 ? ev('content_block_delta', { index: 0, delta: { type: 'citations_delta', citation: { type: 'web_search_result_location', url: 'https://weather.example/nyc', title: 'NYC weather', cited_text: 'sunny', encrypted_index: 'x' } } }) : '')
             + ev('content_block_stop', { index: 0 })
             + toolBlock
-            + ev('message_delta', { delta: { stop_reason: n === 3 ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: { output_tokens: 20 } })
+            + ev('message_delta', { delta: { stop_reason: n === 3 || asksTodo ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: { output_tokens: 20 } })
             + ev('message_stop', {});
           await route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'text/event-stream', 'request-id': 'req_chat' }, body: sse });
           return;
@@ -638,7 +641,7 @@ async function main() {
       await page.getByLabel('Reservation time').fill('2026-12-04T12:30');
       await page.locator('#save-item').click();
       await page.getByText('Added to the plan and removed from Ideas').waitFor();
-      await ideas.getByText(/Save restaurants, activities/).waitFor();
+      await ideas.getByText(/Restaurants, activities and places you might do/).waitFor();
 
       // Save from the day summary, then remove it.
       await page.goto(`${BASE}#/today/2026-12-02`);
@@ -648,12 +651,12 @@ async function main() {
       await ideas.getByText('Bryant Park Winter Village').waitFor();
       page.once('dialog', (d) => d.accept());
       await ideas.getByRole('button', { name: 'Remove' }).click();
-      await ideas.getByText(/Save restaurants, activities/).waitFor();
+      await ideas.getByText(/Restaurants, activities and places you might do/).waitFor();
     });
 
-    await check('voice: ask by voice, the question is sent, the answer is read aloud', async () => {
+    await check('voice: ask by voice; the question is sent as typed text, answers aren\'t read aloud', async () => {
       await page.goto(`${BASE}#/today/2026-12-02`);
-      await page.evaluate(() => { window.__say = 'Where can we eat near the hotel'; window.__spoken = []; });
+      await page.evaluate(() => { window.__say = 'Where can we eat near the hotel'; });
       await page.getByRole('button', { name: 'Ask about this trip' }).click();
       await page.getByRole('button', { name: 'New chat' }).click();
       const before = calls.filter((c) => c.body.stream).length;
@@ -661,39 +664,81 @@ async function main() {
       await page.locator('.msg.me', { hasText: 'Where can we eat near the hotel' }).waitFor();
       await page.locator('.msg.bot', { hasText: 'Katz' }).first().waitFor();
       const req = calls.filter((c) => c.body.stream)[before].body;
-      assert.match(JSON.stringify(req.messages.at(-1).content), /Asked by voice/, 'asks for a short spoken answer');
-      await page.waitForFunction(() => window.__spoken.some((t) => /Katz/.test(t)));
-      const said = await page.evaluate(() => window.__spoken.join(' '));
-      assert.doesNotMatch(said, /\*\*|\n|^- /m, 'read as plain sentences');
-      assert.match(said, /Katz's Delicatessen for lunch\./);
-      // Any answer can be read again; the saved question has no voice note.
-      await page.evaluate(() => { window.__spoken = []; });
-      await page.locator('.msg.bot').last().getByRole('button', { name: 'Read this answer aloud' }).click();
-      await page.waitForFunction(() => window.__spoken.join(' ').includes('Top of the Rock'));
-      assert.doesNotMatch(await page.evaluate(() => localStorage.getItem(Object.keys(localStorage).find((k) => k.startsWith('tp:chat:')))), /Asked by voice/);
+      assert.equal(req.messages.at(-1).content, 'Where can we eat near the hotel');
+      assert.equal(await page.getByRole('button', { name: /Read this answer aloud/ }).count(), 0);
       await shot(page, '17-voice');
-      // Text only: answers to voice questions aren't read out.
       await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
-      await page.goto(`${BASE}#/trip`);
-      await page.getByLabel('Answers to 🎤 questions').selectOption('0');
-      await page.goto(`${BASE}#/today/2026-12-02`);
-      await page.evaluate(() => { window.__spoken = []; window.__say = 'Is it far'; });
+    });
+
+    await check('to-do list: add, tick, edit, remove; due ones show on Today; shared with the chat', async () => {
+      await page.goto(`${BASE}#/plan`);
+      await page.locator('.todo-card').click();
+      await page.getByRole('heading', { name: '✅ To do' }).waitFor();
+      const add = async (text, due) => {
+        await page.getByLabel('What to do').fill(text);
+        if (due) await page.getByLabel('Do by (optional)').fill(due);
+        await page.getByRole('button', { name: 'Add', exact: true }).click();
+        await page.locator('.todo', { hasText: text }).waitFor();
+      };
+      await add('Renew Mia\'s passport', '2026-11-30');
+      await add('Order dollars', '2026-12-02');
+      await page.getByLabel('What to do').fill('order DOLLARS');
+      await page.getByRole('button', { name: 'Add', exact: true }).click();
+      await page.getByText('That\'s already on the to-do list').waitFor();
+      // Soonest due first.
+      assert.deepEqual(await page.locator('.todo .pk-name').allTextContents(), ['Renew Mia\'s passport', 'Order dollars']);
+      await page.locator('.todo', { hasText: 'Order dollars' }).locator('.due', { hasText: 'Due today' }).waitFor();
+      // Today shows what's due.
+      await page.goto(`${BASE}#/today`);
+      await page.locator('.todo-due', { hasText: '2 to-dos due' }).waitFor();
+      await page.goto(`${BASE}#/todo`);
+      // Tick one: it moves to Done.
+      await page.locator('.todo', { hasText: 'Renew' }).getByRole('checkbox').check();
+      await page.locator('.todo.done', { hasText: 'Renew' }).waitFor();
+      await page.getByText('1 of 2 done').waitFor();
+      // Edit.
+      await page.getByRole('button', { name: 'Edit Order dollars' }).click();
+      await page.locator('#todo-edit').getByLabel('Notes').fill('About $300');
+      await page.locator('#todo-edit').getByRole('button', { name: 'Save' }).click();
+      await page.locator('.todo', { hasText: 'About $300' }).waitFor();
+      // From the chat: suggested to-dos come with Add buttons.
       await page.getByRole('button', { name: 'Ask about this trip' }).click();
-      await page.getByRole('button', { name: 'Ask by voice' }).click();
-      await page.locator('.msg.me', { hasText: 'Is it far' }).waitFor();
-      await page.locator('#chat-send:not([disabled])').waitFor();
-      await page.waitForTimeout(300);
-      assert.deepEqual(await page.evaluate(() => window.__spoken), []);
+      await page.getByLabel('Your question').fill('What do we still need to sort out?');
+      await page.getByLabel('Your question').press('Enter');
+      const card = page.locator('.todo-card-chat', { hasText: 'Book the airport transfer' });
+      await card.waitFor();
+      const req = calls.filter((c) => c.body.stream).at(-1).body;
+      assert.ok(req.tools.some((t) => t.name === 'report_todos'), 'chat can suggest to-dos');
+      const sys = JSON.stringify(req.system);
+      assert.match(sys, /To-do list/, 'the chat knows the list');
+      assert.match(sys, /\[ \] Order dollars \(by 2026-12-02\)/);
+      assert.match(sys, /\[x\] Renew Mia's passport/);
+      await card.getByRole('button', { name: /Add to to-do/ }).click();
+      await card.getByText('✓ On the to-do list').waitFor();
+      await shot(page, '22-chat-todo');
       await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
-      await page.goto(`${BASE}#/trip`);
-      await page.getByLabel('Answers to 🎤 questions').selectOption('1');
-      // Voice check: plays a sentence and shows what the phone reports.
-      await page.getByText('🔊 Test voice').click();
-      await page.evaluate(() => { window.__spoken = []; });
-      await page.getByRole('button', { name: 'Phone voice (simple)' }).click();
-      await page.locator('#voice-log li', { hasText: 'Started speaking' }).waitFor();
-      await page.locator('#voice-log li', { hasText: 'Finished' }).waitFor();
-      assert.deepEqual(await page.evaluate(() => window.__spoken), ['This is a voice test from your trip planner.']);
+      const added = page.locator('.todo', { hasText: 'Book the airport transfer' });
+      await added.waitFor();
+      await added.getByText('💬 from the chat').waitFor();
+      await added.getByText('JFK to Hotel Penn').waitFor();
+      await shot(page, '23-todo');
+      // Remove.
+      await page.getByRole('button', { name: 'Remove Order dollars' }).click();
+      await page.locator('.todo', { hasText: 'Order dollars' }).waitFor({ state: 'detached' });
+      await page.goto(`${BASE}#/plan`);
+      await page.locator('.todo-card', { hasText: '1 of 2 done' }).waitFor();
+    });
+
+    await check('ideas: add one by hand', async () => {
+      await page.goto(`${BASE}#/plan`);
+      await page.getByRole('button', { name: '＋ Add idea' }).click();
+      await page.locator('#idea-form').getByLabel('Name').fill('Joe\'s Pizza');
+      await page.locator('#idea-form').getByLabel('Kind').selectOption('restaurant');
+      await page.locator('#idea-form').getByLabel('When (optional)').fill('Late night');
+      await page.locator('#idea-form').getByRole('button', { name: 'Save idea' }).click();
+      const idea = page.locator('#ideas li', { hasText: 'Joe\'s Pizza' });
+      await idea.waitFor();
+      await idea.getByText('Late night').waitFor();
     });
 
     await check('add a flight from just the flight number and date', async () => {
@@ -842,7 +887,7 @@ async function main() {
         assert.equal(await locator.count(), n, what);
       };
       await page.goto(`${BASE}#/plan`);
-      await page.locator('.pack-card').click();
+      await page.locator('a.pack-card[href="#/packing"]').click();
       await page.getByRole('heading', { name: '🎒 Packing' }).waitFor();
       for (const name of ['Alex', 'Mia']) {
         if (await page.locator('#pk-person-form').isHidden()) await page.getByRole('button', { name: '＋ Add person' }).click();
@@ -905,7 +950,7 @@ async function main() {
       await page.locator('.pk-people').getByRole('button', { name: /^Mia/ }).waitFor({ state: 'detached' });
       // Progress shows on the Plan card; persists after reload.
       await page.goto(`${BASE}#/plan`);
-      await page.locator('.pack-card').getByText(/1 of \d+ packed/).waitFor();
+      await page.locator('a.pack-card[href="#/packing"]').getByText(/1 of \d+ packed/).waitFor();
     });
 
     await check('day strip keeps the selected day in view when moving with › and ‹', async () => {

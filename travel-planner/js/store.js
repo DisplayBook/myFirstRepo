@@ -29,7 +29,7 @@ const writeJSON = (k, v) => {
 
 // ---------- device-only preferences ----------
 
-export const DEFAULT_SETTINGS = { name: '', h12: false, unit: 'km', currentTrip: '', aiKey: '', maps: 'google', tiles: 'compact', voiceReplies: true, voiceName: '' };
+export const DEFAULT_SETTINGS = { name: '', h12: false, unit: 'km', currentTrip: '', aiKey: '', maps: 'google', tiles: 'compact' };
 export function getSettings() { return { ...DEFAULT_SETTINGS, ...readJSON(SETTINGS, {}) }; }
 export function setSettings(patch) { const s = { ...getSettings(), ...patch }; writeJSON(SETTINGS, s); return s; }
 
@@ -59,8 +59,8 @@ const local = {
   kind: 'local',
   open(id, onData, onStatus) {
     const cb = (data) => onData(data
-      ? { meta: data.meta || {}, items: Object.values(data.items || {}), files: Object.values(data.files || {}), packing: Object.values(data.packing || {}), role: 'admin', exists: true }
-      : { meta: {}, items: [], files: [], packing: [], role: 'admin', exists: false });
+      ? { meta: data.meta || {}, items: Object.values(data.items || {}), files: Object.values(data.files || {}), packing: Object.values(data.packing || {}), todos: Object.values(data.todos || {}), role: 'admin', exists: true }
+      : { meta: {}, items: [], files: [], packing: [], todos: [], role: 'admin', exists: false });
     if (!listeners.has(id)) listeners.set(id, new Set());
     listeners.get(id).add(cb);
     onStatus({ state: 'local' });
@@ -94,7 +94,7 @@ const local = {
   },
   async snapshot(id) {
     const d = readJSON(tripKey(id), null);
-    return d ? { meta: d.meta || {}, items: Object.values(d.items || {}), files: Object.values(d.files || {}) } : null;
+    return d ? { meta: d.meta || {}, items: Object.values(d.items || {}), files: Object.values(d.files || {}), packing: Object.values(d.packing || {}), todos: Object.values(d.todos || {}) } : null;
   },
   async addFile(id, meta, blob) {
     await idbPut(meta.id, blob);
@@ -118,6 +118,18 @@ const local = {
   async deletePack(id, ids) {
     const d = readJSON(tripKey(id), { meta: {}, items: {} });
     for (const x of [].concat(ids)) delete d.packing?.[x];
+    writeJSON(tripKey(id), d);
+    emitLocal(id);
+  },
+  async saveTodo(id, todo) {
+    const d = readJSON(tripKey(id), { meta: {}, items: {} });
+    d.todos = { ...d.todos, [todo.id]: todo };
+    if (!writeJSON(tripKey(id), d)) throw new Error('Could not save: device storage is full');
+    emitLocal(id);
+  },
+  async deleteTodo(id, todoId) {
+    const d = readJSON(tripKey(id), { meta: {}, items: {} });
+    delete d.todos?.[todoId];
     writeJSON(tripKey(id), d);
     emitLocal(id);
   },
@@ -199,11 +211,11 @@ const cloud = {
   open(id, onData, onStatus) {
     let stopped = false;
     const unsubs = [];
-    let meta = null, metaExists = null, items = null, files = null, role = null, packing = null;
+    let meta = null, metaExists = null, items = null, files = null, role = null, packing = null, todos = null;
     let metaMeta = null, itemsMeta = null;
     const send = () => {
-      if (items === null || metaExists === null || files === null || role === null || packing === null) return;
-      onData({ meta: meta || {}, items, files, role, packing, exists: metaExists || items.length > 0 });
+      if (items === null || metaExists === null || files === null || role === null || packing === null || todos === null) return;
+      onData({ meta: meta || {}, items, files, role, packing, todos, exists: metaExists || items.length > 0 });
       const fromCache = metaMeta?.fromCache || itemsMeta?.fromCache;
       const pending = metaMeta?.hasPendingWrites || itemsMeta?.hasPendingWrites;
       onStatus({ state: pending ? 'pending' : fromCache ? 'offline' : 'synced' });
@@ -232,6 +244,9 @@ const cloud = {
       unsubs.push(fs.onSnapshot(fs.collection(db, 'trips', id, 'packing'), (snap) => {
         packing = snap.docs.map((d) => ({ ...d.data(), id: d.id })); send();
       }, () => { packing = []; send(); })); // rules not updated yet: packing just stays empty
+      unsubs.push(fs.onSnapshot(fs.collection(db, 'trips', id, 'todos'), (snap) => {
+        todos = snap.docs.map((d) => ({ ...d.data(), id: d.id })); send();
+      }, () => { todos = []; send(); })); // rules not updated yet: the to-do list just stays empty
       unsubs.push(fs.onSnapshot(fs.collection(db, 'trips', id, 'files'), (snap) => {
         files = snap.docs.map((d) => ({ ...d.data(), id: d.id })); send();
       }, (err) => { files = []; send(); onErr(err); }));
@@ -290,6 +305,8 @@ const cloud = {
     await Promise.all(snap.docs.map((d) => fs.deleteDoc(d.ref)));
     const pk = await fs.getDocs(fs.collection(db, 'trips', id, 'packing')).catch(() => ({ docs: [] }));
     await Promise.all(pk.docs.map((d) => fs.deleteDoc(d.ref)));
+    const td = await fs.getDocs(fs.collection(db, 'trips', id, 'todos')).catch(() => ({ docs: [] }));
+    await Promise.all(td.docs.map((d) => fs.deleteDoc(d.ref)));
     const invites = await fs.getDocs(fs.collection(db, 'trips', id, 'invites'));
     await Promise.all(invites.docs.map((d) => fs.deleteDoc(d.ref)));
     await fs.deleteDoc(fs.doc(db, 'trips', id));
@@ -329,6 +346,16 @@ const cloud = {
       for (const x of list.slice(i, i + 400)) batch.delete(fs.doc(db, 'trips', id, 'packing', x));
       await batch.commit();
     }
+  },
+  // To-dos: one document each, so people can add and tick at the same time.
+  async saveTodo(id, todo) {
+    const { fs, db } = await loadCloud();
+    const { id: tid, ...data } = todo;
+    await fs.setDoc(fs.doc(db, 'trips', id, 'todos', tid), data);
+  },
+  async deleteTodo(id, todoId) {
+    const { fs, db } = await loadCloud();
+    await fs.deleteDoc(fs.doc(db, 'trips', id, 'todos', todoId));
   },
   // Ideas live in the trip document; arrayUnion/arrayRemove keep two people
   // saving at the same time from overwriting each other.
@@ -383,6 +410,8 @@ export async function moveToCloud(id) {
   if (!snap) throw new Error('Trip not found on this device');
   await cloud.create(id, snap.meta);
   await Promise.all(snap.items.map((it) => cloud.saveItem(id, it)));
+  if (snap.packing.length) await cloud.savePack(id, snap.packing).catch(() => {});
+  await Promise.all(snap.todos.map((t) => cloud.saveTodo(id, t).catch(() => {})));
   for (const f of snap.files) {
     const blob = await local.getFile(id, f).catch(() => null);
     if (blob) await cloud.addFile(id, f, blob);
