@@ -215,26 +215,3 @@ export function placesFrom(content = []) {
 
 /** Is a place already among the saved ideas (same name, ignoring case)? */
 export const isSavedIdea = (ideas = [], name = '') => ideas.some((i) => String(i.name).toLowerCase() === String(name).toLowerCase());
-
-
-/** Added to a question asked by voice: the answer will be read aloud. */
-export const VOICE_NOTE = '\n\n(Asked by voice while travelling; the answer will be read aloud. Reply in one to three short spoken sentences: no lists, tables, links or markdown. Say times and amounts naturally.)';
-
-/** Markdown answer → plain text that sounds right when read aloud. */
-export function speakableText(md = '') {
-  return String(md)
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/^\s*\|.*\|\s*$/gm, ' ')                    // tables
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')               // images
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')             // links → their text
-    .replace(/https?:\/\/\S+/g, ' ')                     // bare links
-    .replace(/^\s{0,3}#{1,6}\s*(.*?)[.:]?\s*$/gm, '$1.')   // headings → sentences
-    .replace(/^\s*(?:[-*+]|\d+[.)])\s+(.*)$/gm, (_, t) => `${t.replace(/[.!?:;,]\s*$/, '')}.`) // list items → sentences
-    .replace(/(\*\*|__|\*|_|`|~~)/g, '')                 // emphasis
-    .replace(/(\d)\s*[–-]\s*(\d)/g, '$1 to $2')          // ranges
-    .replace(/→/g, ' to ')
-    .replace(/\s*\n+\s*/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/\s+([.,!?;:])/g, '$1')
-    .trim();
-}

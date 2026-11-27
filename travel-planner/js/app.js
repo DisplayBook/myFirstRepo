@@ -15,7 +15,7 @@ import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendl
 import { SHARED, PACK_CATEGORIES, TEMPLATES, categoryLabel, splitPacking, expandItems, templateItems, progress as packProgress, groupByCategory, resolveWho, packingTripContext } from './packing.js';
 import { REMINDER_KINDS, ALL_KINDS, buildReminders, remindersHash } from './reminders.js';
 import * as notify from './notify.js';
-import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea, VOICE_NOTE, speakableText } from './chat.js';
+import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, isSavedIdea } from './chat.js';
 import * as voice from './voice.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -1355,19 +1355,7 @@ function renderTripSettings() {
           <label>Time format<select name="h12"><option value="0">24-hour</option><option value="1" ${S.settings.h12 ? 'selected' : ''}>12-hour</option></select></label>
           <label>Distances<select name="unit"><option value="km">km</option><option value="mi" ${S.settings.unit === 'mi' ? 'selected' : ''}>miles</option></select></label>
           <label>Directions open in<select name="maps"><option value="google">Google Maps</option><option value="apple" ${S.settings.maps === 'apple' ? 'selected' : ''}>Apple Maps</option></select></label>
-          <label>Answers to 🎤 questions<select name="voiceReplies"><option value="1">Read aloud</option><option value="0" ${S.settings.voiceReplies === false ? 'selected' : ''}>Text only</option></select></label>
-          <label class="span2">Voice<select name="voiceName">
-            ${aiProxyUrl ? `<option value="">Natural (${esc(NATURAL_VOICES.find(([k]) => k === voiceId())?.[1] || 'automatic')})</option>
-            ${NATURAL_VOICES.map(([k, label]) => `<option value="${k}" ${S.settings.voiceName === k ? 'selected' : ''}>Natural: ${esc(label)}</option>`).join('')}` : ''}
-            <option value="phone" ${S.settings.voiceName === 'phone' || !aiProxyUrl ? 'selected' : ''}>Phone's built-in voice</option></select></label>
         </div>
-        <details class="small voice-check"><summary>🔊 Test voice</summary>
-          <p class="muted">Plays a test sentence. Natural voices come from the trip server and work on shared trips; the phone's own voice can sound robotic and doesn't work in Home Screen apps on some iPhones.</p>
-          <div class="row">${aiProxyUrl ? '<button type="button" class="btn ghost small" data-voice-test="natural">Test natural voice</button>' : ''}
-          <button type="button" class="btn ghost small" data-voice-test="chat">Test phone voice</button>
-          <button type="button" class="btn ghost small" data-voice-test="plain">Phone voice (simple)</button></div>
-          <ol class="voice-log" id="voice-log" aria-live="polite"></ol>
-        </details>
       </form>
     </section>
     <section class="card">
@@ -1440,30 +1428,9 @@ function renderTripSettings() {
   };
   const aiOff = $('#ai-off');
   if (aiOff) aiOff.onclick = () => { S.settings = store.setSettings({ aiKey: '' }); toast('Key removed from this device'); render(); };
-  let voiceTestRun = 0;
-  $$('[data-voice-test]').forEach((b) => {
-    b.onclick = () => {
-      const out = $('#voice-log');
-      out.innerHTML = '';
-      const run = ++voiceTestRun; // messages from an earlier test that arrive late are ignored
-      const add = (t) => { if (out.isConnected && run === voiceTestRun) out.insertAdjacentHTML('beforeend', `<li>${esc(t)}</li>`); };
-      if (b.dataset.voiceTest !== 'natural') { voice.voiceTest({ plain: b.dataset.voiceTest === 'plain', onLog: add }); return; }
-      if (S.trip.kind !== 'cloud') { add('Natural voices work on shared trips.'); return; }
-      voice.stopSpeaking();
-      voice.unlockAudio();
-      const name = voiceId();
-      add(`Asking the trip server for the ${NATURAL_VOICES.find(([k]) => k === name)?.[1] || name} voice…`);
-      fetchSpeech('Hello! This is the voice that will read your trip answers.', name)
-        .then((blob) => { naturalMissingUntil = 0; add(`Got ${Math.round(blob.size / 1024)} KB of audio. Playing…`); return voice.playAudio(blob, { onEnd: () => add('✅ Finished. Did you hear it?') }); })
-        .catch((e) => add(e.status === 501 || e.status === 404
-          ? '❌ The trip server isn\'t set up for voice yet (it needs the Workers AI binding and the latest worker code).'
-          : e.name === 'NotAllowedError' ? '❌ The phone blocked playback. Tap the button again.' : `❌ ${e.message}`));
-    };
-  });
   $('#prefs').onchange = (e) => {
     const fd = new FormData(e.currentTarget);
-    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps'), voiceReplies: fd.get('voiceReplies') !== '0', voiceName: fd.get('voiceName') || '' });
-    if (e.target.name === 'voiceName') naturalMissingUntil = 0;
+    S.settings = store.setSettings({ name: fd.get('name').trim(), h12: fd.get('h12') === '1', unit: fd.get('unit'), maps: fd.get('maps') });
   };
   if (cloud) {
     let code = '';
@@ -2348,117 +2315,7 @@ let chatListening = null; // the open microphone, if any
 function chatVoiceOff() {
   chatListening?.stop();
   chatListening = null;
-  stopReading();
 }
-// Voice answers: natural voices made by the trip server (Workers AI), or the
-// phone's own voice for device-only trips, older servers, or by choice.
-const NATURAL_VOICES = [
-  ['pandora', 'British woman'], ['draco', 'British man'], ['thalia', 'American woman'],
-  ['apollo', 'American man'], ['theia', 'Australian woman'], ['hyperion', 'Australian man'],
-];
-let naturalMissingUntil = 0; // the trip server recently said it has no voice set up
-const naturalVoice = () => !!(aiProxyUrl && S.trip?.kind === 'cloud' && S.settings.voiceName !== 'phone' && Date.now() > naturalMissingUntil);
-function voiceId() {
-  if (NATURAL_VOICES.some(([k]) => k === S.settings.voiceName)) return S.settings.voiceName;
-  const l = (navigator.language || '').toLowerCase();
-  return l.startsWith('en-gb') || l.startsWith('en-ie') ? 'pandora' : l.startsWith('en-au') || l.startsWith('en-nz') ? 'theia' : 'thalia';
-}
-async function fetchSpeech(text, voiceName = voiceId(), { timeoutMs = 25000 } = {}) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${aiProxyUrl}/v1/speech`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${await store.idToken()}`, 'x-trip-id': S.trip.id },
-      body: JSON.stringify({ text, voice: voiceName }),
-      signal: ctl.signal,
-    });
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}));
-      const e = new Error(String(d.error?.message || `Voice error ${res.status}`).replace(/^Trip AI: /, ''));
-      e.status = res.status;
-      throw e;
-    }
-    return await res.blob();
-  } catch (e) {
-    if (e.name === 'AbortError') throw new Error('The voice took too long to arrive. Try again, or check your connection.');
-    throw e;
-  } finally { clearTimeout(timer); }
-}
-/** Call in the tap that will lead to reading something aloud. */
-function unlockVoice() {
-  if (naturalVoice()) { voice.stopSpeaking(); voice.unlockAudio(); return; }
-  // Phone voice: something already playing means it's unlocked; else unlock it now.
-  if (voice.isSpeaking()) voice.stopSpeaking(); else voice.unlockSpeech();
-}
-let readSeq = 0;
-/**
- * Read an answer aloud. onState(state, extra) reports progress:
- * 'loading' (waiting for the server) → 'starting' (audio here, phone starting
- * it) → 'playing' → 'done'; 'blocked' (extra: play() to call from a tap) when
- * the phone won't start the sound by itself; 'error' (extra: message).
- * Natural voice is fetched in short pieces, so it starts quickly and each
- * piece stays small; the next piece loads while one plays.
- */
-async function readAloud(text, { onState } = {}) {
-  const seq = ++readSeq;
-  const plain = speakableText(text);
-  const live = () => seq === readSeq;
-  const state = (st, x) => { if (live() || st === 'done') onState?.(st, x); };
-  if (naturalVoice()) {
-    const pieces = voice.speechChunks(plain, 320);
-    const fetches = [];
-    const get = (i) => {
-      if (!fetches[i]) { fetches[i] = fetchSpeech(pieces[i]); fetches[i].catch(() => {}); }
-      return fetches[i];
-    };
-    // Play piece i; resolves when it ends. Rejects 'blocked' if the phone won't start it.
-    const playPiece = (blob, onStart) => new Promise((resolve, reject) => {
-      let started = false;
-      const timer = setTimeout(() => { if (!started) { voice.stopAudio(); reject(Object.assign(new Error('blocked'), { name: 'NotAllowedError' })); } }, 6000);
-      voice.playAudio(blob, { onEnd: () => { clearTimeout(timer); if (started) resolve(); } })
-        .then(() => { started = true; clearTimeout(timer); onStart(); }, (e) => { clearTimeout(timer); reject(e); });
-    });
-    const run = async (from) => {
-      for (let i = from; i < pieces.length; i++) {
-        let blob;
-        try { blob = await get(i); } catch (e) {
-          if (!live()) return;
-          if (i === 0 && (e.status === 501 || e.status === 404)) { naturalMissingUntil = Date.now() + 60000; return 'fallback'; }
-          // Natural voice busy or over its allowance: use this device's own voice where that works.
-          if (i === 0 && (e.status === 429 || e.status === 502) && voice.phoneVoiceWorks()) { toast(`${e.message} Using this device's voice for now.`); return 'fallback'; }
-          state('error', e.message);
-          return;
-        }
-        if (!live()) return;
-        if (i + 1 < pieces.length) get(i + 1); // load the next piece while this one plays
-        if (i === from) state('starting');
-        try {
-          await playPiece(blob, () => { if (live()) state('playing'); });
-        } catch (e) {
-          if (!live()) return;
-          if (e.name === 'NotAllowedError') { state('blocked', () => { state('starting'); run(i); }); return; }
-          state('error', 'This phone couldn\'t play the voice.');
-          return;
-        }
-        if (!live()) return;
-      }
-      state('done');
-    };
-    state('loading');
-    if (await run(0) !== 'fallback') return;
-  }
-  if (!voice.phoneVoiceWorks()) {
-    state('error', aiProxyUrl && S.trip?.kind === 'cloud'
-      ? 'The trip server isn\'t set up for voice yet (see Trip → Test voice).'
-      : 'Reading aloud needs a shared trip on this iPhone.');
-    return;
-  }
-  state('playing');
-  voice.speak(plain, { onEnd: () => state('done') });
-}
-function stopReading() { readSeq++; voice.stopSpeaking(); }
-
 const VOICE_ERRORS = {
   'not-allowed': 'Microphone access is off for this app. Allow it in your phone\'s Settings, or tap the 🎤 on your keyboard to dictate.',
   'service-not-allowed': 'Voice questions aren\'t available in this app on this phone. Tap the 🎤 on your keyboard to dictate instead.',
@@ -2503,9 +2360,8 @@ function chatBubble(m, mi) {
         <span class="idea-actions"><a class="small" href="${esc(mapSearchUrl(p.address ? `${p.name}, ${p.address}` : p.name))}" target="_blank" rel="noopener">Map</a>
         ${canEdit() ? `${isSavedIdea(ideasList(), p.name) ? '<span class="small saved">✓ In Ideas</span>' : `<button type="button" class="link small" data-chat-save="${mi}:${pi}">☆ Save idea</button>`}
         <button type="button" class="link small" data-chat-plan="${mi}:${pi}">＋ Add to plan</button>` : ''}</span></span></div>`).join('')}</div>` : '';
-  const read = !m.error && voice.canSpeak() ? `<button type="button" class="link small read-aloud" data-chat-speak="${mi}" aria-label="Read this answer aloud">🔊 Read aloud</button>` : '';
   return `<li class="msg bot"><div class="bubble">${m.error ? `<p class="error">${esc(m.text)}</p>` : renderMarkdown(m.text)}
-    ${places}${read}
+    ${places}
     ${(m.sources || []).length ? `<div class="sources"><span class="muted small">Sources:</span> ${m.sources.map((x) => `<a class="small" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>`).join(' · ')}</div>` : ''}</div></li>`;
 }
 
@@ -2520,8 +2376,7 @@ function openChat() {
   }
   openSheet(`<div class="chat">
     <div class="sheet-head"><h2>💬 Ask about this trip</h2>
-      <span class="row"><button type="button" class="link small" id="chat-stop" hidden>■ Stop reading</button>
-      <button type="button" class="link small" id="chat-new">New chat</button>
+      <span class="row">      <button type="button" class="link small" id="chat-new">New chat</button>
       <button type="button" class="iconbtn" data-close aria-label="Close">✕</button></span></div>
     <ol class="chat-log" id="chat-log" aria-live="polite"></ol>
     <div class="chat-starters" id="chat-starters"></div>
@@ -2536,32 +2391,7 @@ function openChat() {
   const log = $('#chat-log');
   const q = $('#chat-q');
   const mic = $('#chat-mic');
-  const stopBtn = $('#chat-stop');
   const PLACEHOLDER = q.placeholder;
-  // One button shows what reading aloud is doing: getting the voice, stop, or play (when the phone needs a tap).
-  let playBlocked = null;
-  const voiceBtn = (label) => {
-    if (!stopBtn.isConnected) return;
-    stopBtn.hidden = !label;
-    stopBtn.textContent = label || '';
-  };
-  const say = (text) => {
-    playBlocked = null;
-    readAloud(text, {
-      onState: (st, x) => {
-        if (st === 'loading') voiceBtn('⏳ Getting voice… ■');
-        else if (st === 'starting') voiceBtn('⏳ Starting… ■');
-        else if (st === 'playing') voiceBtn('■ Stop reading');
-        else if (st === 'blocked') { playBlocked = x; voiceBtn('▶ Play answer'); }
-        else if (st === 'error') { voiceBtn(''); toast(x); }
-        else voiceBtn('');
-      },
-    });
-  };
-  stopBtn.onclick = () => {
-    if (playBlocked) { const play = playBlocked; playBlocked = null; play(); return; }
-    stopReading(); voiceBtn('');
-  };
   const micState = (on) => {
     mic.classList.toggle('on', on);
     mic.setAttribute('aria-pressed', String(on));
@@ -2572,9 +2402,6 @@ function openChat() {
     if (chatListening) { chatListening.stop(); return; }
     if (chatAbort) return;
     if (!voice.canListen()) { toast(VOICE_ERRORS.unsupported); q.focus(); return; }
-    readSeq++;
-    unlockVoice();
-    stopBtn.hidden = true;
     q.value = '';
     micState(true);
     chatListening = voice.listen({
@@ -2583,7 +2410,7 @@ function openChat() {
         chatListening = null;
         if (!mic.isConnected) return;
         micState(false);
-        if (t.trim()) send(t, { spoken: true }); else toast(VOICE_ERRORS['no-speech']);
+        if (t.trim()) send(t); else toast(VOICE_ERRORS['no-speech']);
       },
       onError: (code) => {
         chatListening = null;
@@ -2603,14 +2430,6 @@ function openChat() {
   draw();
   $('#chat-new').onclick = () => { chatAbort?.abort(); chatSave([]); draw(); q.focus(); };
   // Place cards: save to Ideas, or add to the plan (then come back to the chat).
-  log.addEventListener('click', (e) => {
-    const r = e.target.closest('[data-chat-speak]');
-    if (!r) return;
-    const m = chatLoad()[Number(r.dataset.chatSpeak)];
-    if (!m?.text) return;
-    unlockVoice();
-    say(m.text);
-  });
   log.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-chat-save], [data-chat-plan]');
     if (!b) return;
@@ -2630,7 +2449,7 @@ function openChat() {
   q.addEventListener('input', () => { q.style.height = 'auto'; q.style.height = `${Math.min(q.scrollHeight, 140)}px`; });
   $('#chat-form').onsubmit = (e) => { e.preventDefault(); send(q.value); };
 
-  async function send(text, { spoken = false } = {}) {
+  async function send(text) {
     text = String(text || '').trim();
     if (!text || chatAbort) return;
     const tripId = S.trip.id;
@@ -2651,15 +2470,14 @@ function openChat() {
         system: CHAT_SYSTEM,
         context: buildTripContext({ meta: S.meta, items: S.items, files: S.files, now: localDateTime(), live: liveNotes(), packing: S.packing }),
         history: before.filter((m) => !m.error).slice(-20).map((m) => ({ role: m.role, text: m.text })),
-        question: spoken ? `${text}${VOICE_NOTE}` : text,
+        question: text,
         signal: chatAbort.signal,
         onText: (t) => { if (li.isConnected) { $('.bubble', li).innerHTML = renderMarkdown(t); log.scrollTop = log.scrollHeight; } },
       });
       if (S.trip?.id !== tripId) return;
       const places = placesFrom(content);
       const answer = answerText(content) || (places.length ? 'Here are some ideas:' : 'Sorry, I don\'t have an answer for that.');
-      chatSave([...msgs, { role: 'assistant', text: answer, sources: sourcesFrom(content), places, at: Date.now(), spoken }]);
-      if (spoken && S.settings.voiceReplies !== false && log.isConnected) say(answer);
+      chatSave([...msgs, { role: 'assistant', text: answer, sources: sourcesFrom(content), places, at: Date.now() }]);
     } catch (err) {
       if (err?.name === 'AbortError' || chatAbort?.signal.aborted) return;
       if (S.trip?.id === tripId) chatSave([...msgs, { role: 'assistant', text: friendlyError(err), error: true, at: Date.now() }]);

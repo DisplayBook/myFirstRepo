@@ -529,10 +529,6 @@ body[data-view="map"] .fab { bottom: calc(var(--tabbar-h) + env(safe-area-inset-
 .chat-input .mic { flex: none; width: 44px; height: 44px; font-size: 1.2rem; }
 .chat-input .mic.on { background: var(--bad); border-color: transparent; color: var(--bad-ink); animation: mic-pulse 1.2s ease-in-out infinite; }
 @keyframes mic-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(192, 57, 43, .45); } 50% { box-shadow: 0 0 0 8px rgba(192, 57, 43, 0); } }
-.read-aloud { display: inline-block; margin-top: 6px; }
-.voice-check { margin-top: 6px; }
-.voice-log { margin: 8px 0 0; padding-left: 1.2em; display: grid; gap: 4px; overflow-wrap: anywhere; }
-.two > .span2 { grid-column: 1 / -1; }
 @media (hover: hover) and (pointer: fine) {
   .daystrip { scrollbar-width: thin; padding-bottom: 8px; }
   .daystrip::-webkit-scrollbar { display: block; height: 6px; }

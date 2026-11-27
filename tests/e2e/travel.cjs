@@ -73,7 +73,6 @@ async function main() {
     // Most checks read tile details, so start phones with tiles expanded (compact is tested separately).
     await context.addInitScript(() => { if (!localStorage.getItem('tp:settings')) localStorage.setItem('tp:settings', JSON.stringify({ tiles: 'full' })); });
     await context.addInitScript(() => {
-      window.__spoken = [];
       window.__say = '';
       class FakeRecognition {
         start() {
@@ -88,12 +87,6 @@ async function main() {
         stop() {}
       }
       window.SpeechRecognition = FakeRecognition;
-      window.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) { this.text = text; };
-      Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
-        speaking: false, pending: false, paused: false,
-        // Silent utterances (the tap-to-unlock) aren't heard, so aren't recorded.
-        speak(u) { if (u.text.trim() && u.volume !== 0) window.__spoken.push(u.text); setTimeout(() => { u.onstart?.(); u.onend?.(); }, 30); }, cancel() {}, getVoices() { return []; },
-      } });
     });
     const page = await context.newPage();
     const errors = [];
@@ -651,9 +644,9 @@ async function main() {
       await ideas.getByText(/Save restaurants, activities/).waitFor();
     });
 
-    await check('voice: ask by voice, the question is sent, the answer is read aloud', async () => {
+    await check('voice: ask by voice; the question is sent as typed text, answers aren\'t read aloud', async () => {
       await page.goto(`${BASE}#/today/2026-12-02`);
-      await page.evaluate(() => { window.__say = 'Where can we eat near the hotel'; window.__spoken = []; });
+      await page.evaluate(() => { window.__say = 'Where can we eat near the hotel'; });
       await page.getByRole('button', { name: 'Ask about this trip' }).click();
       await page.getByRole('button', { name: 'New chat' }).click();
       const before = calls.filter((c) => c.body.stream).length;
@@ -661,39 +654,10 @@ async function main() {
       await page.locator('.msg.me', { hasText: 'Where can we eat near the hotel' }).waitFor();
       await page.locator('.msg.bot', { hasText: 'Katz' }).first().waitFor();
       const req = calls.filter((c) => c.body.stream)[before].body;
-      assert.match(JSON.stringify(req.messages.at(-1).content), /Asked by voice/, 'asks for a short spoken answer');
-      await page.waitForFunction(() => window.__spoken.some((t) => /Katz/.test(t)));
-      const said = await page.evaluate(() => window.__spoken.join(' '));
-      assert.doesNotMatch(said, /\*\*|\n|^- /m, 'read as plain sentences');
-      assert.match(said, /Katz's Delicatessen for lunch\./);
-      // Any answer can be read again; the saved question has no voice note.
-      await page.evaluate(() => { window.__spoken = []; });
-      await page.locator('.msg.bot').last().getByRole('button', { name: 'Read this answer aloud' }).click();
-      await page.waitForFunction(() => window.__spoken.join(' ').includes('Top of the Rock'));
-      assert.doesNotMatch(await page.evaluate(() => localStorage.getItem(Object.keys(localStorage).find((k) => k.startsWith('tp:chat:')))), /Asked by voice/);
+      assert.equal(req.messages.at(-1).content, 'Where can we eat near the hotel');
+      assert.equal(await page.getByRole('button', { name: /Read this answer aloud/ }).count(), 0);
       await shot(page, '17-voice');
-      // Text only: answers to voice questions aren't read out.
       await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
-      await page.goto(`${BASE}#/trip`);
-      await page.getByLabel('Answers to 🎤 questions').selectOption('0');
-      await page.goto(`${BASE}#/today/2026-12-02`);
-      await page.evaluate(() => { window.__spoken = []; window.__say = 'Is it far'; });
-      await page.getByRole('button', { name: 'Ask about this trip' }).click();
-      await page.getByRole('button', { name: 'Ask by voice' }).click();
-      await page.locator('.msg.me', { hasText: 'Is it far' }).waitFor();
-      await page.locator('#chat-send:not([disabled])').waitFor();
-      await page.waitForTimeout(300);
-      assert.deepEqual(await page.evaluate(() => window.__spoken), []);
-      await page.locator('#sheet').getByRole('button', { name: 'Close' }).click();
-      await page.goto(`${BASE}#/trip`);
-      await page.getByLabel('Answers to 🎤 questions').selectOption('1');
-      // Voice check: plays a sentence and shows what the phone reports.
-      await page.getByText('🔊 Test voice').click();
-      await page.evaluate(() => { window.__spoken = []; });
-      await page.getByRole('button', { name: 'Phone voice (simple)' }).click();
-      await page.locator('#voice-log li', { hasText: 'Started speaking' }).waitFor();
-      await page.locator('#voice-log li', { hasText: 'Finished' }).waitFor();
-      assert.deepEqual(await page.evaluate(() => window.__spoken), ['This is a voice test from your trip planner.']);
     });
 
     await check('add a flight from just the flight number and date', async () => {

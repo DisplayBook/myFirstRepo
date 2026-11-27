@@ -207,16 +207,6 @@ The AI features normally need an Anthropic key on each phone. Instead, a small f
 
 Also set a monthly spending limit in the Anthropic Console (Settings → Limits). Phones with their own key keep using it; device-only trips need a key on the phone.
 
-## Natural voice for spoken answers (optional)
-
-Answers in the trip chat can be read aloud. The phone's own voice often sounds robotic, and in Home Screen apps on some iPhones it doesn't play at all. With this set up, the trip server makes natural-sounding speech instead (Cloudflare Workers AI, voice model `@cf/deepgram/aura-2-en`), using Cloudflare's free daily Workers AI allowance first.
-
-1. Worker **Settings → Bindings → Add → Workers AI**, variable name `AI`. Save.
-2. Paste the latest `workers/trip-ai/worker.js` into the worker (**Edit code**) and **Deploy**.
-3. In the app: **Trip → On this device → Voice** to pick a voice, and **🔊 Test voice → Test natural voice** to hear it.
-
-Optional variable `SPEECH_DAILY_LIMIT` (pieces of speech per phone per day, default 400; answers are read in pieces of a sentence or two).
-
 ## Reminders (push notifications)
 
 Phones on a shared trip can get notifications: time to leave (from the drive time), 3 hours before a flight, online check-in, hotel check-out, car return and parking, payments due, packing, and a morning summary. Each phone picks its own in **Trip → Reminders**.
