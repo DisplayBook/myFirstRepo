@@ -534,3 +534,15 @@ body[data-view="map"] .fab { bottom: calc(var(--tabbar-h) + env(safe-area-inset-
   .daystrip::-webkit-scrollbar { display: block; height: 6px; }
   .daystrip::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 }
+
+/* ---------- to do ---------- */
+.todo label { align-items: flex-start; padding: 10px 0; }
+.todo input[type=checkbox] { margin-top: 2px; }
+.todo-body { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.todo-meta { color: var(--muted); }
+.due.overdue { color: var(--bad); font-weight: 700; }
+.due.soon { color: var(--warn); font-weight: 700; }
+.todo-done-head { display: flex; align-items: baseline; gap: 8px; }
+.todo-done-head .link { margin-left: auto; }
+.todo-due { display: grid; gap: 2px; margin: 10px 0; padding: 10px 14px; border-radius: 12px; background: var(--warn-bg); color: var(--text); text-decoration: none; }
+.ideas-card h2 .btn { margin-left: auto; }

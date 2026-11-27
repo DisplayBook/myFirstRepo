@@ -21,6 +21,7 @@ export const REMINDER_KINDS = [
   ['payment', '💷 Payments due', '3 days before a balance is due'],
   ['packing', '🎒 Packing', '2 days before the trip'],
   ['morning', '☀️ Morning summary', 'At 7:30 each trip day: the day\'s first plans'],
+  ['todo', '✅ To-dos due', 'At 9:00 on the day a to-do is due'],
 ];
 export const ALL_KINDS = REMINDER_KINDS.map(([k]) => k);
 
@@ -83,7 +84,7 @@ const eventPlace = (ev) => ev.place || ev.endPlace || null;
  * opts: { now (ms), tzlookup, deviceTz, h12, bufferPct, routeFor(a, b) → {durationMin} | null, currency }
  * Returns [{ id, kind, at (ms), title, body, day }] sorted by time, future only.
  */
-export function buildReminders({ meta = {}, items = [], packing = [] }, opts = {}) {
+export function buildReminders({ meta = {}, items = [], packing = [], todos = [] }, opts = {}) {
   const now = opts.now ?? Date.now();
   const deviceTz = opts.deviceTz || undefined;
   const h12 = !!opts.h12;
@@ -193,6 +194,15 @@ export function buildReminders({ meta = {}, items = [], packing = [] }, opts = {
       add({ id: `${it.id}:pay:${pay.balanceDue}`, kind: 'payment', day: pay.balanceDue, at: at(`${addDays(pay.balanceDue, -3)}T09:00`, deviceTz),
         title: `💷 ${fmtMoney(pay.due, cur)} due in 3 days`, body: `Balance for ${title} is due by ${fmtDate(pay.balanceDue)}.` });
     }
+  }
+
+  // ✅ To-dos: 9:00 on the day they're due, all due that day in one reminder.
+  const dueDays = new Map();
+  for (const t of todos) if (!t.done && /^\d{4}-\d{2}-\d{2}$/.test(t.due || '')) dueDays.set(t.due, [...(dueDays.get(t.due) || []), t]);
+  for (const [day, list] of dueDays) {
+    add({ id: `todo:${day}`, kind: 'todo', day, at: at(`${day}T09:00`, deviceTz),
+      title: list.length === 1 ? `✅ To do today: ${list[0].text}` : `✅ ${list.length} to-dos due today`,
+      body: list.length === 1 ? (list[0].note || (list[0].who ? `For ${list[0].who}` : 'Tap to see the to-do list.')) : list.map((t) => t.text).join(' · ') });
   }
 
   // 🎒 Packing: 2 days before the trip, if there's a list.

@@ -303,6 +303,17 @@ async function main() {
       await alice.getByText('1 of 1 packed').waitFor();
     });
 
+    await check('to-do list: a view-only phone adds and ticks; the admin sees it live', async () => {
+      await viewer.goto(`${BASE}#/todo`);
+      await viewer.getByLabel('What to do').fill('Buy travel insurance');
+      await viewer.getByRole('button', { name: 'Add', exact: true }).click();
+      await alice.goto(`${BASE}#/todo`);
+      await alice.locator('.todo', { hasText: 'Buy travel insurance' }).waitFor({ timeout: 15000 });
+      await viewer.locator('.todo', { hasText: 'Buy travel insurance' }).getByRole('checkbox').check({ timeout: 15000 });
+      await alice.locator('.todo.done', { hasText: 'Buy travel insurance' }).waitFor({ timeout: 15000 });
+      await alice.getByText('1 of 1 done').waitFor();
+    });
+
     await check('reminders: a phone turns them on, the server gets the plan\'s reminders and sends them when due', async () => {
       const day = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
       await alice.goto(`${BASE}#/today`);

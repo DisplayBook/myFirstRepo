@@ -151,3 +151,18 @@ test('packing lists: anyone on the trip can add, tick and remove; nothing else',
   // Viewers still can't touch bookings.
   await assertFails(setDoc(doc(v, 'trips', TRIP, 'items', 'i9'), { type: 'flight', start: 'x' }));
 });
+
+test('to-do list: anyone on the trip can add, tick and remove; nothing else', async () => {
+  await createTrip('alice');
+  const v = db('viewer');
+  const ref = doc(v, 'trips', TRIP, 'todos', 'td1');
+  await assertSucceeds(setDoc(ref, { text: 'Book airport transfer', done: false, due: '2026-11-20', who: 'Alex', note: 'Ask the hotel', source: 'manual', at: 'now', by: 'Viewer' }));
+  await assertSucceeds(setDoc(ref, { text: 'Book airport transfer', done: true, doneAt: 'now', doneBy: 'Viewer', at: 'now' }));
+  await assertSucceeds(getDocs(collection(db('alice'), 'trips', TRIP, 'todos')));
+  await assertSucceeds(deleteDoc(ref));
+  await assertFails(setDoc(doc(v, 'trips', TRIP, 'todos', 'bad1'), { text: 'x', evil: true }), 'unknown fields');
+  await assertFails(setDoc(doc(v, 'trips', TRIP, 'todos', 'bad2'), { text: '' }), 'empty text');
+  await assertFails(setDoc(doc(v, 'trips', TRIP, 'todos', 'bad3'), { text: 'x'.repeat(201) }), 'too long');
+  await assertFails(setDoc(doc(v, 'trips', TRIP, 'todos', 'bad4'), { text: 'x', note: 'y'.repeat(501) }), 'note too long');
+  await assertFails(setDoc(doc(db(null), 'trips', TRIP, 'todos', 'bad5'), { text: 'x' }), 'signed out');
+});

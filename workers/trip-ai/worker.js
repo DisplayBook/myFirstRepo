@@ -102,7 +102,7 @@ function checkBody(body) {
 
 const PUSH_HOSTS = [/^fcm\.googleapis\.com$/, /^android\.googleapis\.com$/, /(^|\.)push\.apple\.com$/,
   /^updates\.push\.services\.mozilla\.com$/, /(^|\.)push\.services\.mozilla\.com$/, /(^|\.)notify\.windows\.com$/];
-const KINDS = ['leave', 'flight', 'checkin', 'stay', 'car', 'payment', 'packing', 'morning'];
+const KINDS = ['leave', 'flight', 'checkin', 'stay', 'car', 'payment', 'packing', 'morning', 'todo'];
 const MAX_REMINDERS = 300;
 const LATE_MS = 45 * 60 * 1000; // still send a reminder up to 45 min late (missed cron runs)
 
