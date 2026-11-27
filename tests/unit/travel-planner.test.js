@@ -664,3 +664,32 @@ test('scanned bookings of the new types keep their place or route', async () => 
   assert.equal(f.from.name, 'Dover');
   assert.equal(f.to.name, 'Calais');
 });
+
+test('now: what is on now and next, across midnight; when to leave', async () => {
+  const { nowAndNext, eventSpan, eventsForItem } = await import('../../travel-planner/js/logic.js');
+  const { leavePlan } = await import('../../travel-planner/js/reminders.js');
+  const items = [
+    { id: 'f', type: 'flight', number: 'BA 1', from: { name: 'LHR', lat: 51.47, lon: -0.45 }, to: { name: 'JFK', lat: 40.64, lon: -73.78 }, start: '2026-12-01T22:00', end: '2026-12-02T06:00' },
+    { id: 'm', type: 'activity', title: 'MoMA', place: { name: 'MoMA', lat: 40.76, lon: -73.98 }, start: '2026-12-02T10:00', end: '2026-12-02T12:30' },
+    { id: 'd', type: 'restaurant', title: 'Dinner', place: { name: 'Katz' }, start: '2026-12-02T19:00' },
+  ];
+  // Night flight: in the air at 02:00 the next day.
+  let n = nowAndNext(items, '2026-12-02T02:00');
+  assert.deepEqual(n.current.map((c) => [c.ev.item.id, c.ev.kind, c.end, c.left, c.pct]), [['f', 'depart', '2026-12-02T06:00', 240, 50]]);
+  assert.equal(n.next.label, 'Arrive JFK');
+  // During MoMA; then between plans; then after the last one.
+  n = nowAndNext(items, '2026-12-02T11:15');
+  assert.deepEqual(n.current.map((c) => [c.ev.item.id, c.left, c.pct]), [['m', 75, 50]]);
+  assert.equal(n.next.item.id, 'd');
+  n = nowAndNext(items, '2026-12-02T15:00');
+  assert.deepEqual(n.current, []);
+  assert.equal(n.next.item.id, 'd');
+  n = nowAndNext(items, '2026-12-02T19:30');
+  assert.deepEqual(n.current.map((c) => c.ev.item.id), ['d'], 'no end given: on for an hour');
+  assert.equal(nowAndNext(items, '2026-12-02T21:00').next, null);
+  assert.deepEqual(eventSpan(eventsForItem(items[0])[1]), ['2026-12-02T06:00', '2026-12-02T06:15'], 'arrival is a moment');
+  // Leave by: drive + buffer + 2 h at the airport for a flight.
+  const flightEv = eventsForItem({ ...items[0], start: '2026-12-02T09:00', end: '2026-12-02T17:00' })[0];
+  const plan = leavePlan(flightEv, { from: { lat: 51.45, lon: -0.97 }, to: items[0].from }, { routeMin: 50, bufferPct: 10 });
+  assert.deepEqual(plan, { leaveLocal: '2026-12-02T06:05', drive: 55, margin: 120, isFlight: true, estimate: false });
+});

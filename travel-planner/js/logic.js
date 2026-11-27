@@ -569,6 +569,40 @@ export function sortEvents(events) {
   return events.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9)));
 }
 
+/**
+ * When a timeline event is "on", as [start, end] local times: a flight or train
+ * until it arrives, a drive until it's expected to end, an activity until it
+ * ends (an hour if no end is given), and a moment (check-in, pick-up, arrival)
+ * for 15 minutes.
+ */
+export function eventSpan(ev) {
+  const it = ev.item;
+  if (ev.kind === 'depart' && it.end && it.end > ev.at) return [ev.at, it.end];
+  if (ev.kind === 'drive' && ev.endAt) return [ev.at, ev.endAt];
+  if (ev.kind === 'activity') return [ev.at, ev.endAt || addMinutes(ev.at, 60)];
+  return [ev.at, addMinutes(ev.at, 15)];
+}
+
+/**
+ * What's on at `now` ("YYYY-MM-DDTHH:MM") and what's next. Looks across days,
+ * so a flight that left last night still shows as in progress.
+ * Returns { current: [{ ev, start, end, left, pct }], next: ev | null }.
+ */
+export function nowAndNext(items, now, bufferPct = 0) {
+  const evs = [];
+  for (const it of items) for (const e of eventsForItem(it, bufferPct)) evs.push(e);
+  sortEvents(evs);
+  const current = [];
+  for (const ev of evs) {
+    const [start, end] = eventSpan(ev);
+    if (start <= now && now < end) {
+      const total = Math.max(1, diffMinutes(start, end));
+      current.push({ ev, start, end, left: diffMinutes(now, end), pct: Math.min(100, Math.max(0, Math.round((diffMinutes(start, now) / total) * 100))) });
+    }
+  }
+  return { current, next: evs.find((e) => e.at > now) || null };
+}
+
 /** Hotel you sleep in on the night starting `date` (check-in date <= date < check-out date). */
 export function hotelForNight(items, date) {
   return items.find((it) => it.type === 'hotel' && it.start && it.end && datePart(it.start) <= date && date < datePart(it.end)) || null;

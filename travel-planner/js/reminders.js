@@ -74,6 +74,20 @@ export function estimateDriveMin(a, b) {
   return Math.max(5, Math.round(km / kmh * 60 / 5) * 5);
 }
 
+/**
+ * When to set off for an event, given the drive there (a leg from driveLegs):
+ * drive time (route if known, else an estimate) plus buffer, plus 2 hours for
+ * a flight, 30 minutes for a train/ferry/etc. and 10 minutes otherwise.
+ */
+export function leavePlan(ev, leg, { routeMin = null, bufferPct = 0 } = {}) {
+  const known = Number(routeMin) > 0;
+  const base = known ? Number(routeMin) : estimateDriveMin(leg.from, leg.to);
+  const drive = Math.round(base * (1 + (Number(bufferPct) || 0) / 100));
+  const isFlight = ev.item.type === 'flight' && ev.kind === 'depart';
+  const margin = isFlight ? 120 : shapeOf(ev.item.type) === 'journey' ? 30 : 10;
+  return { leaveLocal: addMinutes(ev.at, -(drive + margin)), drive, margin, isFlight, estimate: !known };
+}
+
 const clip = (s, n) => (String(s || '').length > n ? `${String(s).slice(0, n - 1)}…` : String(s || ''));
 
 /** Where an event's local time is read from. */
@@ -136,11 +150,7 @@ export function buildReminders({ meta = {}, items = [], packing = [], todos = []
       const ev = ag.events[leg.index];
       if (!ev || !leg.toAt) continue;
       const route = routeFor(leg.from, leg.to);
-      const base = Number(route?.durationMin) || estimateDriveMin(leg.from, leg.to);
-      const drive = Math.round(base * (1 + bufferPct / 100));
-      const isFlight = ev.item.type === 'flight' && ev.kind === 'depart';
-      const margin = isFlight ? 120 : shapeOf(ev.item.type) === 'journey' ? 30 : 10;
-      const leaveLocal = addMinutes(ev.at, -(drive + margin));
+      const { leaveLocal, drive, margin, isFlight } = leavePlan(ev, leg, { routeMin: route?.durationMin, bufferPct });
       const tz = zone(ev.item);
       covered.add(`${ev.item.id}:${ev.kind}`);
       add({ id: `${ev.item.id}:${ev.kind}:leave`, kind: 'leave', day, at: at(leaveLocal, tz) - 15 * 60000,
