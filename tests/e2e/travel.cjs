@@ -631,8 +631,10 @@ async function main() {
       await page.goto(`${BASE}#/today/2026-12-03`);
       await page.locator('.ev', { hasText: 'Best skyline views at sunset.' }).getByText('18:00').waitFor();
 
-      // Ideas on the Plan tab: add one to the plan (it leaves Ideas).
+      // Plan → Ideas: add one to the plan (it leaves Ideas).
       await page.goto(`${BASE}#/plan`);
+      await page.locator('.ideas-link', { hasText: /\d+ saved/ }).click();
+      await page.getByRole('heading', { name: '💡 Ideas' }).waitFor();
       const ideas = page.locator('#ideas');
       await ideas.getByText('Katz\'s Delicatessen').waitFor();
       await shot(page, '16-ideas');
@@ -641,17 +643,17 @@ async function main() {
       await page.getByLabel('Reservation time').fill('2026-12-04T12:30');
       await page.locator('#save-item').click();
       await page.getByText('Added to the plan and removed from Ideas').waitFor();
-      await ideas.getByText(/Restaurants, activities and places you might do/).waitFor();
+      await page.locator('#ideas-empty').waitFor();
 
       // Save from the day summary, then remove it.
       await page.goto(`${BASE}#/today/2026-12-02`);
       await page.locator('.brief-ideas li', { hasText: 'Bryant Park' }).getByRole('button', { name: /Save idea/ }).click();
       await page.locator('.brief-ideas li', { hasText: 'Bryant Park' }).getByText('✓ In Ideas').waitFor();
-      await page.goto(`${BASE}#/plan`);
+      await page.goto(`${BASE}#/ideas`);
       await ideas.getByText('Bryant Park Winter Village').waitFor();
       page.once('dialog', (d) => d.accept());
       await ideas.getByRole('button', { name: 'Remove' }).click();
-      await ideas.getByText(/Restaurants, activities and places you might do/).waitFor();
+      await page.locator('#ideas-empty').waitFor();
     });
 
     await check('voice: ask by voice; the question is sent as typed text, answers aren\'t read aloud', async () => {
@@ -729,16 +731,25 @@ async function main() {
       await page.locator('.todo-card', { hasText: '1 of 2 done' }).waitFor();
     });
 
-    await check('ideas: add one by hand', async () => {
+    await check('ideas: their own screen (like To do); add one by hand', async () => {
       await page.goto(`${BASE}#/plan`);
-      await page.getByRole('button', { name: '＋ Add idea' }).click();
-      await page.locator('#idea-form').getByLabel('Name').fill('Joe\'s Pizza');
-      await page.locator('#idea-form').getByLabel('Kind').selectOption('restaurant');
-      await page.locator('#idea-form').getByLabel('When (optional)').fill('Late night');
-      await page.locator('#idea-form').getByRole('button', { name: 'Save idea' }).click();
+      await page.locator('.ideas-link').click();
+      await page.getByRole('heading', { name: '💡 Ideas' }).waitFor();
+      const form = page.locator('#idea-add');
+      await form.getByLabel('Name').fill('Joe\'s Pizza');
+      await form.getByLabel('Kind').selectOption('restaurant');
+      await form.getByLabel('When (optional)').fill('Late night');
+      await form.getByText('Address and notes').click();
+      await form.getByLabel('Address or area').fill('1435 Broadway');
+      await form.getByRole('button', { name: 'Add', exact: true }).click();
       const idea = page.locator('#ideas li', { hasText: 'Joe\'s Pizza' });
       await idea.waitFor();
       await idea.getByText('Late night').waitFor();
+      await idea.getByText('1435 Broadway').waitFor();
+      assert.equal(await form.getByLabel('Name').inputValue(), '', 'form clears for the next one');
+      await shot(page, '24-ideas');
+      await page.getByRole('link', { name: 'Back to Plan' }).click();
+      await page.locator('.ideas-link', { hasText: /\d+ saved/ }).waitFor();
     });
 
     await check('add a flight from just the flight number and date', async () => {

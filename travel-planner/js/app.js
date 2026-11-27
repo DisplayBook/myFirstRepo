@@ -241,7 +241,7 @@ function render({ fromData = false } = {}) {
   // Don't rebuild the map for status-only updates while you're looking at it.
   if (fromData && name === 'map' && sheet.open) return;
   $$('.tabbar a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.tab === name));
-  $('#fab').hidden = name === 'trips' || name === 'packing' || name === 'todo' || !S.trip || !canEdit();
+  $('#fab').hidden = name === 'trips' || name === 'packing' || name === 'todo' || name === 'ideas' || !S.trip || !canEdit();
   $('#chat-btn').hidden = name === 'trips' || !S.trip;
   document.body.dataset.view = name;
   if (name !== 'map') destroyMap();
@@ -254,6 +254,7 @@ function render({ fromData = false } = {}) {
     case 'budget': renderBudget(); break;
     case 'packing': renderPacking(); break;
     case 'todo': renderTodos(); break;
+    case 'ideas': renderIdeas(); break;
     default: renderToday(r.arg);
   }
   renderStatus();
@@ -799,7 +800,7 @@ async function saveIdea(p, source) {
     source, addedBy: S.settings.name, addedAt: new Date().toISOString(),
   });
   try { await write((b, id) => b.addIdea(id, idea)); } catch { return false; }
-  toast('Saved to Ideas (top of the Plan tab)');
+  toast('Saved to Ideas (Plan → 💡 Ideas)');
   return true;
 }
 
@@ -818,13 +819,37 @@ async function placeToPlan(x, { day, onSaved } = {}) {
   openItemForm(type, null, { title: x.name, place, start: `${d}T${guessTime(x.when)}`, notes: x.why }, { onSaved });
 }
 
+/** On Plan: a card that opens the Ideas screen. */
 function ideasCard() {
+  const n = ideasList().length;
+  return `<a class="card pack-card ideas-link" href="#/ideas">
+    <span class="pack-card-title"><strong>💡 Ideas</strong>
+      <span class="muted small">${n ? `${n} saved` : 'Restaurants, activities and places you might do'}</span></span>
+    <span aria-hidden="true" class="chev">›</span></a>`;
+}
+
+const IDEA_KINDS = { attraction: 'Attraction', restaurant: 'Restaurant', cafe: 'Café', bar: 'Bar', shopping: 'Shopping', event: 'Event', outdoors: 'Outdoors', other: 'Other' };
+
+function renderIdeas() {
+  if (loadingOrMissing()) return;
   const ideas = ideasList();
-  if (!ideas.length && !canEdit()) return '';
-  return `<section class="card ideas-card" id="ideas">
-    <h2><span>💡 Ideas${ideas.length ? ` <span class="muted small">${ideas.length}</span>` : ''}</span>
-      ${canEdit() ? '<button type="button" class="btn ghost small" data-idea-new>＋ Add idea</button>' : ''}</h2>
-    ${ideas.length ? `<ul class="ideas-list">${ideas.map((x) => `<li>
+  main.innerHTML = `<div class="pk-top"><a class="iconbtn" href="#/plan" aria-label="Back to Plan">‹</a><h1>💡 Ideas</h1></div>
+    <p class="muted">${ideas.length ? `${ideas.length} saved` : 'Restaurants, activities and places you might do. Everyone on the trip sees them.'}</p>
+    ${canEdit() ? `<form class="card form pk-add" id="idea-add">
+      <h2>Add an idea</h2>
+      <input name="name" placeholder="e.g. Dishoom, sunset boat trip" autocomplete="off" aria-label="Name" maxlength="120" required>
+      <div class="two">
+        <label>Kind<select name="category">${Object.entries(IDEA_KINDS).map(([k, l]) => `<option value="${k}">${PLACE_ICON[k]} ${l}</option>`).join('')}</select></label>
+        <label>When (optional)<input name="when" maxlength="60" autocomplete="off" placeholder="e.g. Thu lunch"></label>
+      </div>
+      <details class="small idea-more"><summary>Address and notes</summary>
+        <label>Address or area<input name="address" maxlength="200" autocomplete="off"></label>
+        <label>Why / notes<textarea name="why" rows="2" maxlength="300"></textarea></label>
+      </details>
+      <button class="btn">Add</button>
+    </form>` : ''}
+    ${aiOn() ? '<p class="muted small">Tip: ask in the 💬 chat, e.g. "where should we eat near the hotel?", then tap ☆ Save idea. The ✨ day summary on Today suggests places too.</p>' : ''}
+    ${ideas.length ? `<section class="card ideas-card" id="ideas"><ul class="ideas-list">${ideas.map((x) => `<li>
       <span class="idea-icon" aria-hidden="true">${PLACE_ICON[x.category] || '📍'}</span>
       <span class="idea-body"><strong>${esc(x.name)}</strong>${x.when ? ` <span class="muted small">· ${esc(x.when)}</span>` : ''}
         ${x.why ? `<span class="small">${esc(x.why)}</span>` : ''}
@@ -832,9 +857,16 @@ function ideasCard() {
         ${x.addedBy ? `<span class="muted small">Saved by ${esc(x.addedBy)}</span>` : ''}
         <span class="idea-actions"><a class="small" href="${esc(mapSearchUrl(x.address ? `${x.name}, ${x.address}` : x.name))}" target="_blank" rel="noopener">Map</a>
         ${canEdit() ? `<button type="button" class="link small" data-idea-plan="${esc(x.id)}">＋ Add to plan</button>
-        <button type="button" class="link small danger-link" data-idea-remove="${esc(x.id)}">Remove</button>` : ''}</span></span></li>`).join('')}</ul>`
-      : '<p class="muted small">Restaurants, activities and places you might do. Add them here, or save them from the 💬 chat or the day summary on Today. Everyone on the trip sees them.</p>'}
-  </section>`;
+        <button type="button" class="link small danger-link" data-idea-remove="${esc(x.id)}">Remove</button>` : ''}</span></span></li>`).join('')}</ul></section>`
+      : '<p class="empty" id="ideas-empty">No ideas yet.</p>'}`;
+  const form = $('#idea-add');
+  if (form) form.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const p = Object.fromEntries(['name', 'category', 'when', 'address', 'why'].map((k) => [k, String(fd.get(k) || '').trim()]));
+    if (!p.name) return;
+    if (await saveIdea(p, 'manual')) { form.reset(); form.elements.name.focus(); }
+  };
 }
 
 // ---------- To do ----------
@@ -954,29 +986,6 @@ function openTodoEdit(t) {
     const { due, who, note, ...rest } = t;
     writeTodo((b, id) => b.saveTodo(id, cleanItem({ ...rest, text, due: fd.get('due'), who: String(fd.get('who') || '').trim(), note: String(fd.get('note') || '').trim() })));
     closeSheet();
-  };
-}
-
-/** Add an idea by hand: a restaurant, activity or place you might do. */
-function openIdeaForm() {
-  openSheet(`<form class="form" id="idea-form">
-    <div class="sheet-head"><h2>💡 Add an idea</h2><button type="button" class="iconbtn" data-close aria-label="Close">✕</button></div>
-    <label>Name<input name="name" required maxlength="120" autocomplete="off" placeholder="e.g. Dishoom, sunset boat trip"></label>
-    <div class="two">
-      <label>Kind<select name="category">${Object.entries({ attraction: 'Attraction', restaurant: 'Restaurant', cafe: 'Café', bar: 'Bar', shopping: 'Shopping', event: 'Event', outdoors: 'Outdoors', other: 'Other' })
-        .map(([k, l]) => `<option value="${k}">${PLACE_ICON[k]} ${l}</option>`).join('')}</select></label>
-      <label>When (optional)<input name="when" maxlength="60" autocomplete="off" placeholder="e.g. Thu lunch"></label>
-    </div>
-    <label>Address or area (optional)<input name="address" maxlength="200" autocomplete="off"></label>
-    <label>Why / notes (optional)<textarea name="why" rows="2" maxlength="300"></textarea></label>
-    <div class="row"><span class="grow"></span><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Save idea</button></div>
-  </form>`, 'Add an idea');
-  $('#idea-form').onsubmit = async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const p = Object.fromEntries(['name', 'category', 'when', 'address', 'why'].map((k) => [k, String(fd.get(k) || '').trim()]));
-    if (!p.name) return;
-    if (await saveIdea(p, 'manual')) closeSheet();
   };
 }
 
@@ -1803,7 +1812,6 @@ main.addEventListener('click', (e) => {
     if (x) saveIdea(x, 'summary');
     return;
   }
-  if (e.target.closest('[data-idea-new]')) { openIdeaForm(); return; }
   const todoDel = e.target.closest('[data-todo-del]');
   if (todoDel) { writeTodo((b, id) => b.deleteTodo(id, todoDel.dataset.todoDel)); return; }
   const todoEdit = e.target.closest('[data-todo-edit]');

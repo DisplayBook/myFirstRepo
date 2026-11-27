@@ -279,16 +279,18 @@ async function main() {
       await card.getByRole('button', { name: /Save idea/ }).click();
       await card.getByText('✓ In Ideas').waitFor({ timeout: 15000 });
       await alice.locator('#sheet').getByRole('button', { name: 'Close' }).click();
-      // Appears on the viewer's Plan, without edit buttons.
-      await viewer.goto(`${BASE}#/plan`);
+      // Appears on the viewer's Ideas screen, without edit buttons.
+      await viewer.goto(`${BASE}#/ideas`);
       await viewer.locator('#ideas').getByText('Gelateria del Teatro').waitFor({ timeout: 15000 });
       assert.equal(await viewer.locator('#ideas').getByRole('button', { name: 'Remove' }).count(), 0);
       // The admin removes it; it disappears for the viewer too.
+      assert.equal(await viewer.locator('#idea-add').count(), 0, 'no add form on view-only phones');
+      await alice.goto(`${BASE}#/ideas`);
       await alice.locator('#ideas').getByText('Gelateria del Teatro').waitFor();
       alice.once('dialog', (d) => d.accept());
       await alice.locator('#ideas').getByRole('button', { name: 'Remove' }).click();
       await alice.locator('#ideas').getByText('Gelateria del Teatro').waitFor({ state: 'detached', timeout: 15000 });
-      await viewer.locator('#ideas').waitFor({ state: 'detached', timeout: 15000 });
+      await viewer.locator('#ideas-empty').waitFor({ timeout: 15000 });
     });
 
     await check('packing: a view-only phone ticks items; the admin sees it live', async () => {
