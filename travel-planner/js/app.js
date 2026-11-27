@@ -3,7 +3,7 @@ import {
   TYPES, TYPE_GROUPS, shapeOf, uid, isTripId, datePart, timePart, addDays, daysBetween, dateRange, localDate, localDateTime,
   fmtDate, fmtTime, fmtDuration, fmtDistance, fmtUntil, diffMinutes, addMinutes, hasCoords, shortName,
   haversineKm, greatCircle, decodePolyline, knownPlaces, itemTitle, driveMinutes, itemEnd, validateItem,
-  cleanItem, eventsForItem, dayAgenda, tripSpan, defaultDay, driveLegs, legStatus, hotelForNight, toICS, formatFlightNo,
+  cleanItem, eventsForItem, dayAgenda, tripSpan, defaultDay, driveLegs, legStatus, hotelForNight, toICS, formatFlightNo, eventSpan, nowAndNext,
 } from './logic.js';
 import * as store from './store.js';
 import { aiProxyUrl } from './config.js';
@@ -13,7 +13,7 @@ import { ACCEPT, prepareFile, fmtBytes, fileIcon, isImage } from './files.js';
 import { CURRENCIES, homeCurrency, fmtMoney, hasCost, budgetSummary, parseAmount, payment } from './budget.js';
 import { extractBookings, transcribe, normalizeBookings, placesToLocate, friendlyError, flightStatus, roadConditions, dayBrief, guessTime, askTrip, flightDetails, normalizeFlightLookup, suggestPacking } from './ai.js';
 import { SHARED, PACK_CATEGORIES, TEMPLATES, categoryLabel, splitPacking, expandItems, templateItems, progress as packProgress, groupByCategory, resolveWho, packingTripContext } from './packing.js';
-import { REMINDER_KINDS, ALL_KINDS, buildReminders, remindersHash } from './reminders.js';
+import { REMINDER_KINDS, ALL_KINDS, buildReminders, remindersHash, leavePlan } from './reminders.js';
 import * as notify from './notify.js';
 import { buildTripContext, CHAT_SYSTEM, renderMarkdown, sourcesFrom, answerText, placesFrom, todosFrom, isSavedIdea } from './chat.js';
 import { sortTodos, todoProgress, dueInfo, hasTodo } from './todos.js';
@@ -369,7 +369,7 @@ function liveChip(ev) {
   return lv ? `<span class="ev-chip ${lv[2]}">${lv[0]} ${esc(lv[1])}</span>` : '';
 }
 
-function eventRow(ev, { live = false } = {}) {
+function eventRow(ev, { live = false, state = '' } = {}) {
   const def = TYPES[ev.item.type];
   const open = isExpanded(ev);
   const dest = live && open ? eventDestination(ev) : null;
@@ -380,12 +380,12 @@ function eventRow(ev, { live = false } = {}) {
   const isMain = ['depart', 'checkin', 'pickup', 'activity', 'drive'].includes(ev.kind);
   const hasMore = meta.length > 1 || docCount(ev.item.id) || (ev.item.notes && isMain) || (live && (eventDestination(ev) || liveHtml(ev)));
   const endT = ev.endAt && ev.kind === 'activity' ? `–${t12(timePart(ev.endAt))}` : '';
-  return `<li class="ev ${open ? 'open' : 'compact'}" style="--c:${def.color}" data-item="${esc(ev.item.id)}">
+  return `<li class="ev ${open ? 'open' : 'compact'} ${state}" style="--c:${def.color}" data-item="${esc(ev.item.id)}">
     ${canEdit() ? `<button type="button" class="swipe-del" data-item="${esc(ev.item.id)}" tabindex="-1" aria-label="Delete ${esc(itemTitle(ev.item))}">Delete</button>` : ''}
     <button type="button" class="ev-btn" data-edit="${esc(ev.item.id)}" aria-label="${esc(`${t12(time)} ${ev.label}. Edit`)}">
       <span class="ev-time">${esc(t12(time))}<small>${esc(endT)}</small></span>
       <span class="ev-icon" aria-hidden="true">${evIcon(ev)}</span>
-      <span class="ev-body"><strong>${esc(ev.label)}</strong>
+      <span class="ev-body">${state === 'now' ? '<span class="now-badge">Now</span>' : ''}<strong>${esc(ev.label)}</strong>
         ${(open ? meta : meta.slice(0, 1)).map((b) => `<span class="ev-meta">${esc(b)}</span>`).join('')}
         ${!open ? liveChip(ev) : ''}
         ${open && docCount(ev.item.id) && isMain ? `<span class="ev-docs">📎 ${docCount(ev.item.id)} document${docCount(ev.item.id) === 1 ? '' : 's'}</span>` : ''}
@@ -436,6 +436,47 @@ function fillLegs(legs, root) {
   });
 }
 
+/** Today's "Now" panel: what's on now (with time left), and what's next (with when to leave). */
+function nowPanel(nn, now, today, ag, legs) {
+  const time = (at) => `${datePart(at) !== today ? `${fmtDate(datePart(at))} ` : ''}${t12(timePart(at))}`;
+  const current = nn.current.map((c) => {
+    const ends = c.ev.kind === 'depart' ? `arrives ${time(c.end)}` : `until ${time(c.end)}`;
+    return `<div class="now-item" style="--c:${TYPES[c.ev.item.type].color}">
+      <strong>${evIcon(c.ev)} ${esc(c.ev.label)}</strong>
+      <span class="small">${esc(ends)} · ${esc(fmtDuration(c.left))} left</span>
+      <span class="meter now-meter" role="progressbar" aria-valuenow="${c.pct}" aria-valuemin="0" aria-valuemax="100" aria-label="How far through"><span style="width:${c.pct}%"></span></span></div>`;
+  }).join('');
+  const nx = nn.next;
+  let nextHtml = '';
+  if (nx) {
+    const until = diffMinutes(now, nx.at);
+    const where = shortName(nx.place);
+    // When to leave: the drive to it from where you'll be before (today only).
+    let leave = '';
+    const i = datePart(nx.at) === today ? ag.events.indexOf(ag.events.find((e) => e.item.id === nx.item.id && e.kind === nx.kind)) : -1;
+    const leg = i >= 0 ? legs.find((l) => l.index === i) : null;
+    if (leg) {
+      const plan = leavePlan(nx, leg, { routeMin: cachedRoute(leg.from, leg.to)?.durationMin, bufferPct: bufferPct() });
+      const mins = diffMinutes(now, plan.leaveLocal);
+      leave = `<span class="now-leave ${mins <= 10 ? 'urgent' : ''}">🧭 ${mins <= 0 ? '<strong>Time to leave</strong>' : `Leave by <strong>${esc(t12(timePart(plan.leaveLocal)))}</strong> (${esc(fmtUntil(mins))})`}
+        · ${plan.estimate ? 'about ' : ''}${esc(fmtDuration(plan.drive))} drive${plan.isFlight ? ' + 2 h at the airport' : ''}</span>`;
+    }
+    const dest = eventDestination(nx);
+    nextHtml = `<div class="now-next" style="--c:${TYPES[nx.item.type].color}">
+      <span class="next-label">Next · ${esc(fmtUntil(until))}</span>
+      <strong>${evIcon(nx)} ${esc(nx.label)}</strong>
+      <span class="small">${esc(time(nx.at))}${where && !nx.label.includes(where) ? ` · ${esc(where)}` : ''}</span>
+      ${leave}
+      ${dest ? `<a class="small now-go" href="${esc(directionsUrl(null, dest))}" target="_blank" rel="noopener">🧭 Directions${shortName(dest) ? ` to ${esc(shortName(dest))}` : ''}</a>` : ''}</div>`;
+  }
+  const idle = nx && datePart(nx.at) === today ? 'Free time' : 'Nothing more planned today';
+  return `<section class="nowcard" aria-label="Now">
+    <div class="now-head"><span class="now-dot" aria-hidden="true"></span>Now · ${esc(t12(timePart(now)))}</div>
+    ${current || `<p class="now-free">${idle}${ag.tonight && !nx ? ` · 🌙 ${esc(ag.tonight.title)} tonight` : ''}</p>`}
+    ${nextHtml}
+  </section>`;
+}
+
 function renderToday(arg) {
   if (loadingOrMissing()) return;
   const span = tripSpan(S.meta, S.items);
@@ -455,28 +496,29 @@ function renderToday(arg) {
     banner = '<p class="banner">This trip is over. Showing the last day.</p>';
   }
 
-  let next = '';
-  if (day === today) {
-    const now = localDateTime();
-    const upcoming = ag.events.find((e) => e.at >= now);
-    if (upcoming) {
-      next = `<div class="next" style="--c:${TYPES[upcoming.item.type].color}">
-        <span class="next-label">Next up · ${esc(fmtUntil(diffMinutes(now, upcoming.at)))}</span>
-        <strong>${evIcon(upcoming)} ${esc(upcoming.label)}</strong>
-        <span>${esc(t12(timePart(upcoming.at)))}${upcoming.place?.name ? ` · ${esc(shortName(upcoming.place))}` : ''}</span></div>`;
-    }
-  }
+  const isToday = day === today;
+  const now = localDateTime();
+  const nn = isToday ? nowAndNext(S.items, now, bufferPct()) : null;
+  const nowKeys = new Set((nn?.current || []).map((c) => evKey(c.ev)));
+  const next = isToday ? nowPanel(nn, now, today, ag, legs) : '';
 
   const ctx = [];
   if (ag.lastNight && !ag.events.some((e) => e.kind === 'checkout' && e.item.id === ag.lastNight.id)) ctx.push(`🛏️ Staying at ${esc(ag.lastNight.title)}`);
   for (const it of ag.ongoing) ctx.push(`${TYPES[it.type].icon} ${esc(itemTitle(it))}${it.type === 'car' ? ` until ${esc(fmtDate(datePart(it.end)))}` : ' (continues)'}`);
 
+  // Where you are in the day: a "Now" line before the first plan still to come;
+  // finished plans fade, the current one is highlighted.
+  const nowLine = `<li class="now-line" aria-label="Now ${esc(t12(timePart(now)))}"><span>Now · ${esc(t12(timePart(now)))}</span></li>`;
+  let lineDone = !isToday;
   let rows = '';
   ag.events.forEach((ev, i) => {
+    const state = !isToday ? '' : nowKeys.has(evKey(ev)) ? 'now' : eventSpan(ev)[1] <= now ? 'past' : '';
+    if (!lineDone && ev.at > now) { rows += nowLine; lineDone = true; }
     legs.forEach((l, li) => { if (l.index === i) rows += legRow(l, li); });
-    rows += eventRow(ev, { live: true });
+    rows += eventRow(ev, { live: true, state });
   });
   legs.forEach((l, li) => { if (l.index === ag.events.length) rows += legRow(l, li); });
+  if (!lineDone && ag.events.length) rows += nowLine;
 
   const strip = days.length > 1 && days.length <= 90 ? `<nav class="daystrip" aria-label="Trip days">${days.map((d, i) => `
       <a href="#/today/${d}" class="${d === day ? 'sel' : ''} ${d === today ? 'today' : ''}" ${d === day ? 'aria-current="date"' : ''}>
@@ -2840,6 +2882,23 @@ function start() {
   if (cur) openTrip(cur.id, cur.kind);
   render();
 }
+
+// Keep Today's "Now" up to date: re-draw when the minute changes, unless the
+// screen was just touched (so taps, swipes and typing are never interrupted).
+let lastTouch = 0;
+for (const ev of ['pointerdown', 'keydown', 'touchstart', 'focusin']) window.addEventListener(ev, () => { lastTouch = Date.now(); }, { passive: true, capture: true });
+let lastMinute = localDateTime();
+setInterval(() => {
+  const m = localDateTime();
+  if (m === lastMinute) return;
+  if (document.visibilityState !== 'visible' || sheet.open || swipe || pull || refreshing || Date.now() - lastTouch < 15000) return;
+  if ((parseRoute().name || 'today') !== 'today' || !S.trip || S.viewDay !== localDate()) { lastMinute = m; return; }
+  lastMinute = m;
+  render({ fromData: true });
+}, 10000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && S.trip && (parseRoute().name || 'today') === 'today' && !sheet.open) { lastMinute = localDateTime(); render({ fromData: true }); }
+});
 
 navigator.serviceWorker?.addEventListener?.('message', (e) => {
   if (e.data?.type === 'open' && typeof e.data.hash === 'string' && e.data.hash.startsWith('#/')) location.hash = e.data.hash;

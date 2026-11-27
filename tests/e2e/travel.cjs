@@ -166,8 +166,37 @@ async function main() {
       const go = page.locator('.ev', { hasText: 'MoMA' }).locator('.ev-go a');
       assert.equal(await go.textContent(), '🧭 Directions to Museum of Modern Art');
       assert.equal(await go.getAttribute('href'), 'https://www.google.com/maps/dir/?api=1&destination=40.7614%2C-73.9776');
-      await page.locator('.next').getByText('Next up · in 1 h').waitFor();
+      // The Now panel: nothing on yet (09:00), MoMA next, with when to leave the hotel.
+      const nowcard = page.locator('.nowcard');
+      await nowcard.getByText('Now · 09:00').waitFor();
+      await nowcard.getByText('Free time').waitFor();
+      await nowcard.locator('.now-next').getByText('Next · in 1 h').waitFor();
+      await nowcard.locator('.now-next', { hasText: 'MoMA' }).waitFor();
+      await nowcard.locator('.now-leave').getByText(/Leave by/).waitFor();
+      assert.equal(await nowcard.locator('.now-go').getAttribute('href'), 'https://www.google.com/maps/dir/?api=1&destination=40.7614%2C-73.9776');
+      // The Now line sits before the first plan still to come.
+      assert.equal(await page.locator('.timeline > li').first().getAttribute('class'), 'now-line');
       await shot(page, '03-today');
+    });
+
+    await check('Now: during a plan it shows time left; finished plans fade; it updates by itself', async () => {
+      await page.clock.setFixedTime(new Date(2026, 11, 2, 11, 0, 0));
+      await page.goto(`${BASE}#/today`);
+      const nowcard = page.locator('.nowcard');
+      await nowcard.getByText('Now · 11:00').waitFor();
+      const cur = nowcard.locator('.now-item', { hasText: 'MoMA' });
+      await cur.getByText('until 12:30 · 1 h 30 min left').waitFor();
+      assert.equal(await cur.locator('[role=progressbar]').getAttribute('aria-valuenow'), '40');
+      await page.locator('.ev.now', { hasText: 'MoMA' }).locator('.now-badge').waitFor();
+      await shot(page, '25-now');
+      // Later in the day: MoMA is done (faded); the line moves on; no reload needed.
+      await page.clock.setFixedTime(new Date(2026, 11, 2, 13, 0, 0));
+      await page.clock.runFor(11000);
+      await nowcard.getByText('Now · 13:00').waitFor();
+      await page.locator('.ev.past', { hasText: 'MoMA' }).waitFor();
+      assert.equal(await page.locator('.ev.now').count(), 0);
+      await page.clock.setFixedTime(new Date(2026, 11, 2, 9, 0, 0));
+      await page.clock.resume();
     });
 
     await check('attach documents to a booking, view them, add and remove more', async () => {
@@ -212,7 +241,7 @@ async function main() {
       await page.getByLabel('Starts').fill('2026-12-02T13:00');
       await page.getByLabel('Ends').fill('2026-12-02T13:45');
       await save();
-      await page.locator('.leg[data-status="late"]').getByText(/you'd be late/).waitFor();
+      await page.locator('.leg[data-status="late"]').getByText(/you'd be late/).first().waitFor();
       await shot(page, '04-late');
       // Remove it again (with undo available).
       await page.getByRole('button', { name: /Lunch in Boston/ }).click();

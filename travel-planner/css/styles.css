@@ -549,3 +549,27 @@ body[data-view="map"] .fab { bottom: calc(var(--tabbar-h) + env(safe-area-inset-
 .idea-more { margin: 4px 0 8px; }
 .idea-more summary { cursor: pointer; color: var(--accent); }
 .idea-more label { margin-top: 8px; }
+
+/* ---------- Today: now ---------- */
+.nowcard { display: grid; gap: 10px; margin: 12px 0; padding: 14px 16px; border-radius: var(--radius); background: var(--card); box-shadow: var(--shadow); border: 2px solid var(--accent); }
+.now-head { display: flex; align-items: center; gap: 8px; font-size: .8rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); }
+.now-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); animation: now-pulse 2s ease-in-out infinite; }
+@keyframes now-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(194, 47, 47, .5); } 50% { box-shadow: 0 0 0 6px rgba(194, 47, 47, 0); } }
+.now-item { display: grid; gap: 4px; padding-left: 10px; border-left: 5px solid var(--c); }
+.now-item strong { font-size: 1.15rem; }
+.now-meter { height: 6px; border-radius: 3px; background: var(--chip); overflow: hidden; }
+.now-meter span { background: var(--c); }
+.now-free { margin: 0; font-weight: 600; }
+.now-next { display: grid; gap: 3px; padding-top: 10px; border-top: 1px solid var(--line); }
+.now-next strong { font-size: 1.05rem; }
+.now-next .next-label { color: var(--c); }
+.now-leave { font-size: .9rem; }
+.now-leave.urgent { color: var(--bad); }
+.now-go { justify-self: start; margin-top: 2px; }
+.timeline .ev.past { opacity: .55; }
+.timeline .ev.now { box-shadow: 0 0 0 2px var(--accent); border-radius: 12px; }
+.now-badge { display: inline-block; margin-right: 6px; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-size: .7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; vertical-align: 2px; }
+.now-line { display: flex; align-items: center; gap: 8px; margin: 4px 0; color: var(--bad); font-size: .75rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; list-style: none; }
+.now-line::before, .now-line::after { content: ''; flex: 1; height: 2px; background: var(--bad); }
+.now-line::before { flex: 0 0 14px; }
+@media (prefers-reduced-motion: reduce) { .now-dot { animation: none; } }
